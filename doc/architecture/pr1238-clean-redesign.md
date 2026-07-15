@@ -8,7 +8,12 @@ worklog.
 ## Observed facts
 
 - Repository: `dmMaze/BallonsTranslator`
-- Fixed implementation baseline: `e652479c9872efaf6a30d84bf8124c09ece3e762`
+- Historical fixed implementation baseline: `e652479c9872efaf6a30d84bf8124c09ece3e762`
+- Current implementation target described by this document:
+  `a1f7c1f7b6e1e93400a4372b8e228d3908a1a966`
+- The target SHA identifies the production and test code immediately before this
+  documentation update. The commit containing this documentation change will
+  necessarily have a different SHA and must not be confused with the target.
 - Comparison-only `upstream/dev`: `6155f9b303033b24f57a2c025d2edbfed3eb847f`
 - PR #1238 base: `6bff00ee017706eb54637dce828cb0149632ecca`
 - PR #1238 head: `57e9f1c604fc9ccbc79dc9fbf7ad91d77592cf04`
@@ -111,6 +116,14 @@ origin writes are rejected in the pre-change notification so validation never
 escapes through Qt's C++ virtual-call boundary; a nonfinite persisted block
 angle is repaired to zero while loading.
 
+In concrete Qt state, `transform()` stores the derived `C`, while the built-in
+`rotation` property continues to store the requested angle represented by `R`.
+The pre-change notification validates the candidate and can return the current
+value to reject it. The post-change notification installs the matching `C`
+before `rotationChanged` observers run. Consequently a property observer never
+sees the new rotation paired with the old anisotropic matrix. Neither `C` nor a
+second rotation value is written to the model.
+
 The normal Box pivot and rotation origin are both the center of
 `logical_unpadded_rect()`. The derived helper keeps them explicit so a Qt origin
 property write remains mathematically defined. Horizontal and vertical writing
@@ -188,6 +201,13 @@ matrix, anchor position, and model rectangle agree, then one final
 from that notification is deferred until delivery completes. If synchronous
 relayout mutates its size and then raises, the same final-state reconciliation
 and notification happen before the original error is propagated.
+
+Both rotation finalization and `set_size()` keep the transform-list invariant
+and derived-matrix installation inside guarded transactions. Exceptions raised
+while Qt calls the `itemChange()` virtual are contained and logged rather than
+crossing the C++/Python callback boundary. A `set_size()` relayout error is
+different: the item first reconciles to the layout's observable final size and
+then re-raises the original error at the Python caller boundary.
 
 Nonzero Glyph Slant bounds are calculated from the same live glyph runs,
 orientation, and shear used to paint. `SceneTextLayout.glyphInkBounds()` caches
@@ -367,23 +387,56 @@ presets and copy/paste; no `italic_angle` style alias is introduced.
 global quartet as one update. It deliberately supplements rather than replaces
 the existing font/effect/writing-mode allow-list.
 
+When the existing Effect override is enabled,
+`_apply_global_text_effects(block, global_format)` copies exactly these ten
+fields to `TextBlock.fontformat`:
+
+```text
+opacity
+shadow_radius
+shadow_strength
+shadow_color
+shadow_offset
+gradient_enabled
+gradient_start_color
+gradient_end_color
+gradient_angle
+gradient_size
+```
+
+The six scalar fields are assigned by value. The four mutable fields
+`shadow_color`, `shadow_offset`, `gradient_start_color`, and
+`gradient_end_color` are deep-copied for every result block so blocks neither
+share them with the global format nor with one another. All Gradient payload
+fields are copied even when `gradient_enabled` is false: disabling an existing
+block Gradient is itself part of the override, and the configured colors,
+angle, and size must remain available for later re-enabling. The helper writes
+the canonical `FontFormat` owner directly; no parallel `TextBlock` Gradient
+property or live `TextBlkItem` mutation is introduced.
+
 For a normal non-inpaint-only run, existing style override logic runs first and
-the helper then applies all four global values to every result block, including
-a horizontal scale of exactly `1.0` and blocks newly produced by detection.
+the transform helper then applies all four global values to every result block,
+including a horizontal scale of exactly `1.0` and blocks newly produced by
+detection.
 Transform application does not depend on the other style override flags.
+Effect application remains conditional on the existing Effect override flag;
+when it is disabled, the result block's existing effect values are retained.
 
 For **Run without update textstyle**, the run snapshots each existing block's
 complete `FontFormat` and block identity before detection can replace blocks.
 If both block identities and count still match for a page, each full backup
-format is restored and the global quartet helper is not called. If the backup
-is absent, count differs, or identity differs, the pipeline performs no
+format is restored and neither global helper is called. `FontFormat.merge()`
+deep-copies that backup, including all effect and Gradient fields. If the
+backup is absent, count differs, or identity differs, the pipeline performs no
 index-based guess: it falls back to normal global-format semantics and logs one
-warning for that page. Warning deduplication resets at run start.
+warning for that page. The fallback applies global effects only when the Effect
+override is enabled. Warning deduplication resets at run start.
 
-Inpaint-only remains style-neutral. Selected-block translation commands preserve
-the existing block's complete `FontFormat`; manual new blocks and Apply Global
-Format continue to use the complete global format; copy/paste keeps the deep
-copy; and detection identity, auto-layout, and squeeze behavior are unchanged.
+Inpaint-only remains style-neutral: translation postprocessing and both global
+helpers are skipped. Selected-block translation commands preserve the existing
+block's complete `FontFormat`; manual new blocks and Apply Global Format continue
+to use the complete global format; copy/paste keeps the deep copy; and detection
+identity, auto-layout, and squeeze behavior are unchanged.
 
 ## Required invariants
 
@@ -408,11 +461,87 @@ copy; and detection identity, auto-layout, and squeeze behavior are unchanged.
   preserve HTML/document state, and synchronize overlays once.
 - Schema-v2 violations, future versions, and ambiguous legacy payloads reject
   transactionally; old Box values are never reinterpreted as Glyph Slant.
-- Normal translation applies the global quartet; exact preserve-style matches
-  restore the full backup format; ambiguous matches use warned normal fallback.
+- Normal translation applies the global quartet and, when enabled, the complete
+  ten-field global Effect payload; exact preserve-style matches restore the full
+  backup format; ambiguous matches use warned normal fallback.
 - No-op operations leave undo count, repaint notifications, layout/effect
   generations, item matrices, and canonical model values unchanged.
 
-Verification commands, baseline results, manual artifacts, and the independent
-review report are stored with the implementation artifacts rather than asserted
-as facts here before they have run.
+## Verification status for the current target
+
+The recorded local replay script at
+`artifacts/pr1238-clean-redesign/a1f7c1f7b6e1e93400a4372b8e228d3908a1a966/generate_evidence.py`
+ran against implementation target
+`a1f7c1f7b6e1e93400a4372b8e228d3908a1a966` on 2026-07-16. It first verified
+that `HEAD` matched the target and that production and test paths had no tracked,
+staged, or untracked differences from it. The recorded results are:
+
+- the five compensation, item-change safety, rotation-property,
+  translation-pipeline, and transactional `set_size()` regression modules:
+  29 tests and 151 subtests passed under each of PyQt5, PyQt6, and PySide6;
+- every `test_text_transform*.py` and `test_textitem*.py` module under PyQt6:
+  209 tests and 409 subtests passed;
+- the current full PyQt6 suite: 7 failed, 374 passed, 1 skipped, and 446
+  subtests passed;
+- the exact `6155f9b303033b24f57a2c025d2edbfed3eb847f` upstream full PyQt6
+  suite under the same executable, dependency overlay, and environment:
+  7 failed, 159 passed, 1 skipped, and 7 subtests passed;
+- both full-suite JUnit files contain the same seven failure identities, so the
+  target introduces no new full-suite failure relative to the fixed baseline;
+- all 14 production Python modules changed from the fixed baseline passed an
+  in-memory syntax compilation check, and the relevant `FontFormat`,
+  text-transform, and translation-helper doctest items passed.
+
+Raw logs, JUnit XML, environment data, Git provenance, hashes, and the generated
+summary are stored under that target-specific artifact directory. These are
+automated results, not independent reviewer approval or a substitute for the
+remaining manual GUI work.
+
+### Manual status
+
+The record contains one post-fix user confirmation and one post-fix screenshot
+comparison supplied by the user in the development conversation:
+
+- after the rotation-composition correction, the user confirmed that the
+  reported non-uniform-scale rotation deformation was fixed and instructed that
+  the change be committed;
+- after the Effect-pipeline correction, before/after screenshots from an actual
+  detection, OCR, translation, and inpainting run showed the result block
+  carrying the configured Horizontal Scale, Vertical Scale, Box Slant, Glyph
+  Slant, Gradient enabled state, Shadow radius, and other visible effect values.
+  Separate code/config inspection explained the remaining Font Family and
+  Alignment differences as their configured `Keep existing` and
+  `decide by program` policies; that interpretation is not a second manual pass.
+
+Those screenshots remain conversation attachments and were not copied into the
+repository. The record is therefore a user attestation, not a self-contained or
+independently reproduced GUI bundle; displayed values do not prove every paint,
+persistence, export, or override branch. Before PR submission, the remaining
+manual checks include:
+
+- broader lifecycle coverage beyond the confirmed rotation case: anisotropic
+  H/V Scale with nonzero rotation and Box Slant during handle drag, commit,
+  undo/redo, save, restart, and reload;
+- a complete detection/OCR/translation/inpainting run covering global Gradient
+  disable, nonzero Shadow offset, canvas paint, saved project, reload, and final
+  export in addition to the already observed result-panel values;
+- Effect override disabled, **Run without update textstyle**, and inpaint-only
+  runs, confirming their preservation boundaries;
+- Font Family and Alignment with both available override-policy choices so the
+  UI policy and resulting block values are unambiguous.
+
+### Superseded evidence and pending review
+
+The tracked artifact bundle under
+`artifacts/pr1238-clean-redesign/f101479edbaf4b35606fe7503ae752846055d71d/`
+attests only the older `f101479edbaf4b35606fe7503ae752846055d71d` code. Its
+three-control screenshots, schema-v1 fixture, focused-test totals, provenance,
+and independent approval predate the four-component/schema-v2 redesign, the
+rotation compensation, and the Effect/Gradient pipeline fix. It is therefore
+superseded and must not be presented as verification of the current target.
+
+A fresh automated artifact set now exists under the current implementation SHA.
+Independent final review of the exact implementation, this documentation, and
+the artifact bundle remains pending. Review must continue to distinguish
+automated offscreen evidence, user attestation, and independently reproduced
+human-equivalent GUI execution.

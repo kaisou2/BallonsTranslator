@@ -1,0 +1,15 @@
+{
+  "dependency_overlay": "F:\\ballon\\.pr1238-test-deps",
+  "generated_at_utc": "2026-07-15T17:48:42.359056+00:00",
+  "packages": {
+    "PyQt5": "5.15.11",
+    "PyQt6": "6.6.1",
+    "PySide6": "6.8.2.1",
+    "pytest": "9.1.1",
+    "pytest-subtests": null,
+    "qtpy": "2.4.3"
+  },
+  "platform": "Windows-10-10.0.19045-SP0",
+  "python_executable": "F:\\python\\python.exe",
+  "python_version": "Python 3.10.6"
+}

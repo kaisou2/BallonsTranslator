@@ -1,0 +1,18 @@
+label=focused-pyqt6
+cwd=F:\ballon\BallonsTranslator
+environment_overrides={"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": "F:\\ballon\\.pr1238-test-deps", "QT_API": "pyqt6", "QT_QPA_PLATFORM": "offscreen"}
+command=["F:\\python\\python.exe", "-m", "pytest", "-p", "no:cacheprovider", "tests/test_text_transform_compensation.py", "tests/test_text_transform_itemchange_safety.py", "tests/test_text_transform_rotation_properties.py", "tests/test_text_transform_translation_pipeline.py", "tests/test_textitem_set_size_transaction.py", "-q", "--junitxml=F:\\ballon\\BallonsTranslator\\artifacts\\pr1238-clean-redesign\\a1f7c1f7b6e1e93400a4372b8e228d3908a1a966\\test-results\\focused-pyqt6.xml"]
+exit_code=0
+expected_exit_codes=[0]
+--- stdout ---
+...... [ 20%]
+.......................                                     [100%]
+============================== warnings summary ===============================
+ballontranslator\utils\io_utils.py:22
+  F:\ballon\BallonsTranslator\ballontranslator\utils\io_utils.py:22: DeprecationWarning: `np.bool8` is a deprecated alias for `np.bool_`.  (Deprecated NumPy 1.24)
+    NP_BOOL_TYPES = (np.bool_, np.bool8)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+29 passed, 1 warning, 151 subtests passed in 3.93s
+
+--- stderr ---

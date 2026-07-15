@@ -1,0 +1,17 @@
+label=relevant-doctests
+cwd=F:\ballon\BallonsTranslator
+environment_overrides={"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": "F:\\ballon\\.pr1238-test-deps", "QT_API": "pyqt6", "QT_QPA_PLATFORM": "offscreen"}
+command=["F:\\python\\python.exe", "-m", "pytest", "-p", "no:cacheprovider", "--doctest-modules", "ballontranslator/utils/fontformat.py", "ballontranslator/ui/text_transform.py", "ballontranslator/ui/mainwindow.py", "-q"]
+exit_code=0
+expected_exit_codes=[0]
+--- stdout ---
+......                                                                   [100%]
+============================== warnings summary ===============================
+ballontranslator\utils\io_utils.py:22
+  F:\ballon\BallonsTranslator\ballontranslator\utils\io_utils.py:22: DeprecationWarning: `np.bool8` is a deprecated alias for `np.bool_`.  (Deprecated NumPy 1.24)
+    NP_BOOL_TYPES = (np.bool_, np.bool8)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+6 passed, 1 warning in 1.14s
+
+--- stderr ---

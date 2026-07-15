@@ -1,0 +1,229 @@
+label=full-upstream-pyqt6
+cwd=F:\ballon\BallonsTranslator-baseline-6155f9b
+environment_overrides={"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": "F:\\ballon\\.pr1238-test-deps", "QT_API": "pyqt6", "QT_QPA_PLATFORM": "offscreen"}
+command=["F:\\python\\python.exe", "-m", "pytest", "-p", "no:cacheprovider", "tests", "-q", "--junitxml=F:\\ballon\\BallonsTranslator\\artifacts\\pr1238-clean-redesign\\a1f7c1f7b6e1e93400a4372b8e228d3908a1a966\\test-results\\full-upstream-pyqt6.xml"]
+exit_code=1
+expected_exit_codes=[1]
+--- stdout ---
+.........................F..F........................................... [ 43%]
+..s...............F.......FF.F.................................. [ 81%]
+..............................                                           [100%]
+================================== FAILURES ===================================
+______ LazyMetadataTests.test_current_lazy_registry_metadata_is_complete ______
+
+self = <test_lazy_metadata.LazyMetadataTests testMethod=test_current_lazy_registry_metadata_is_complete>
+
+    def test_current_lazy_registry_metadata_is_complete(self):
+        from ballontranslator.modules import GET_VALID_TEXTDETECTORS, INPAINTERS, OCR, TEXTDETECTORS, TRANSLATORS
+    
+        registries = [TRANSLATORS, TEXTDETECTORS, OCR, INPAINTERS]
+        specs = [registry.get_spec(key) for registry in registries for key in registry.module_dict]
+    
+>       self.assertEqual(validate_lazy_module_specs([spec for spec in specs if spec is not None]), [])
+E       AssertionError: Lists differ: ['windows_ocr: OCRWindows.params could not be evaluated lazily'] != []
+E       
+E       First list contains 1 additional elements.
+E       First extra element 0:
+E       'windows_ocr: OCRWindows.params could not be evaluated lazily'
+E       
+E       - ['windows_ocr: OCRWindows.params could not be evaluated lazily']
+E       + []
+
+tests\test_lazy_metadata.py:96: AssertionError
+_______ LazyMetadataTests.test_safe_selector_helper_output_is_preserved _______
+
+self = <test_lazy_metadata.LazyMetadataTests testMethod=test_safe_selector_helper_output_is_preserved>
+
+        def test_safe_selector_helper_output_is_preserved(self):
+            source = '''
+    MODEL_DIR = "data/models"
+    PREFIXES = ("demo",)
+    
+    @register_textdetectors("demo")
+    class DemoDetector:
+        params = {
+            "model path": {
+                "type": "selector",
+                "options": find_model_paths(MODEL_DIR, PREFIXES),
+                "value": "data/models/demo.pt",
+                "editable": True,
+            }
+        }
+    '''
+            with mock.patch('ballontranslator.modules.lazy_registry.os.listdir', return_value=['demo_a.pt', 'other.pt']):
+                specs = self.scan_source(source, 'textdetector')
+    
+>           self.assertEqual(specs[0].params['model path']['options'], ['data/models/demo_a.pt'])
+E           AssertionError: Lists differ: ['dat[14 chars]a.pt', 'data/models/ysgyolo_yolo26_2.0.pt', 'd[32 chars].pt'] != ['dat[14 chars]a.pt']
+E           
+E           First list contains 2 additional elements.
+E           First extra element 1:
+E           'data/models/ysgyolo_yolo26_2.0.pt'
+E           
+E           - ['data/models/demo_a.pt',
+E           ?                         ^
+E           
+E           + ['data/models/demo_a.pt']
+E           ?                         ^
+E           
+E           -  'data/models/ysgyolo_yolo26_2.0.pt',
+E           -  'data/models/ysgyolo_yolo26OBB_2.0.pt']
+
+tests\test_lazy_metadata.py:87: AssertionError
+_ LLMProfileMigrationTest.test_program_config_load_merges_current_builtin_defaults _
+
+self = <test_llm_profiles.LLMProfileMigrationTest testMethod=test_program_config_load_merges_current_builtin_defaults>
+
+    def test_program_config_load_merges_current_builtin_defaults(self):
+        profile = default_profile('OpenAI')
+        profile.model_options = ['legacy-model']
+        cfg = ProgramConfig(module=ModuleConfig(llm_profiles=[profile], translator_llm_id='openai'))
+        raw = json.loads(json_dump_program_config(cfg))
+        raw['module']['llm_profiles'][0]['model_options'] = ['legacy-model']
+    
+        with tempfile.NamedTemporaryFile('w+', encoding='utf8') as temp:
+            json.dump(raw, temp)
+            temp.flush()
+>           loaded = ProgramConfig.load(temp.name)
+
+tests\test_llm_profiles.py:80: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+cfg_path = 'C:\\Users\\mingi\\AppData\\Local\\Temp\\tmpwgqbd8c0'
+
+    @staticmethod
+    def load(cfg_path: str):
+    
+>       with open(cfg_path, 'r', encoding='utf8') as f:
+E       PermissionError: [Errno 13] Permission denied: 'C:\\Users\\mingi\\AppData\\Local\\Temp\\tmpwgqbd8c0'
+
+ballontranslator\utils\config.py:224: PermissionError
+_ LLMProfileMigrationTest.test_vision_enabled_builtins_default_to_auto_detail (provider='Gemini') _
+
+self = <test_llm_profiles.LLMProfileMigrationTest testMethod=test_vision_enabled_builtins_default_to_auto_detail>
+
+    def test_vision_enabled_builtins_default_to_auto_detail(self):
+        for provider in ['OpenAI', 'Gemini', 'OpenRouter', 'Ollama']:
+            with self.subTest(provider=provider):
+                profile = default_profile(provider)
+    
+                self.assertTrue(profile.support_text)
+                self.assertTrue(profile.support_vision)
+>               self.assertEqual(profile.vision_model, profile.model)
+E               AssertionError: 'gemini-flash-latest' != 'gemini-3.5-flash'
+E               - gemini-flash-latest
+E               + gemini-3.5-flash
+
+tests\test_llm_profiles.py:248: AssertionError
+_ SecretStoreTest.test_saved_config_roundtrips_inpaint_llm_profile_selection __
+
+self = <test_llm_profiles.SecretStoreTest testMethod=test_saved_config_roundtrips_inpaint_llm_profile_selection>
+
+    def test_saved_config_roundtrips_inpaint_llm_profile_selection(self):
+        profile = default_profile('OpenRouter')
+        profile.api_key = 'sk-demo'
+        cfg = ProgramConfig(module=ModuleConfig(
+            llm_profiles=[profile],
+            translator_llm_id='openrouter',
+            ocr_llm_id='openrouter',
+            inpaint_llm_id='openrouter',
+        ))
+        saved = json_dump_program_config(cfg)
+    
+        with tempfile.NamedTemporaryFile('w+', encoding='utf8') as temp:
+            temp.write(saved)
+            temp.flush()
+>           loaded = ProgramConfig.load(temp.name)
+
+tests\test_llm_profiles.py:384: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+cfg_path = 'C:\\Users\\mingi\\AppData\\Local\\Temp\\tmp4j0h12jr'
+
+    @staticmethod
+    def load(cfg_path: str):
+    
+>       with open(cfg_path, 'r', encoding='utf8') as f:
+E       PermissionError: [Errno 13] Permission denied: 'C:\\Users\\mingi\\AppData\\Local\\Temp\\tmp4j0h12jr'
+
+ballontranslator\utils\config.py:224: PermissionError
+___ SecretStoreTest.test_saved_config_roundtrips_ocr_llm_profile_selection ____
+
+self = <test_llm_profiles.SecretStoreTest testMethod=test_saved_config_roundtrips_ocr_llm_profile_selection>
+
+    def test_saved_config_roundtrips_ocr_llm_profile_selection(self):
+        profile = default_profile('OpenAI')
+        profile.api_key = 'sk-demo'
+        profile.support_text = False
+        profile.vision_model = 'gpt-4o'
+        profile.vision_model_options = ['gpt-4o', 'gpt-4o-mini']
+        profile.vision_detail_level = 'high'
+        cfg = ProgramConfig(module=ModuleConfig(
+            llm_profiles=[profile],
+            translator_llm_id='openai',
+            ocr_llm_id='openai',
+            inpaint_llm_id='openai',
+        ))
+        saved = json_dump_program_config(cfg)
+    
+        with tempfile.NamedTemporaryFile('w+', encoding='utf8') as temp:
+            temp.write(saved)
+            temp.flush()
+>           loaded = ProgramConfig.load(temp.name)
+
+tests\test_llm_profiles.py:356: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+cfg_path = 'C:\\Users\\mingi\\AppData\\Local\\Temp\\tmp510ong_t'
+
+    @staticmethod
+    def load(cfg_path: str):
+    
+>       with open(cfg_path, 'r', encoding='utf8') as f:
+E       PermissionError: [Errno 13] Permission denied: 'C:\\Users\\mingi\\AppData\\Local\\Temp\\tmp510ong_t'
+
+ballontranslator\utils\config.py:224: PermissionError
+_______ SecretStoreTest.test_saved_profiles_roundtrip_without_provider ________
+
+self = <test_llm_profiles.SecretStoreTest testMethod=test_saved_profiles_roundtrip_without_provider>
+
+    def test_saved_profiles_roundtrip_without_provider(self):
+        profile = default_profile('OpenAI')
+        profile.api_key = 'sk-demo'
+        cfg = ProgramConfig(module=ModuleConfig(llm_profiles=[profile], translator_llm_id='openai'))
+        saved = json_dump_program_config(cfg)
+    
+        with tempfile.NamedTemporaryFile('w+', encoding='utf8') as temp:
+            temp.write(saved)
+            temp.flush()
+>           loaded = ProgramConfig.load(temp.name)
+
+tests\test_llm_profiles.py:330: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+cfg_path = 'C:\\Users\\mingi\\AppData\\Local\\Temp\\tmpj4cem4j8'
+
+    @staticmethod
+    def load(cfg_path: str):
+    
+>       with open(cfg_path, 'r', encoding='utf8') as f:
+E       PermissionError: [Errno 13] Permission denied: 'C:\\Users\\mingi\\AppData\\Local\\Temp\\tmpj4cem4j8'
+
+ballontranslator\utils\config.py:224: PermissionError
+============================== warnings summary ===============================
+ballontranslator\utils\io_utils.py:22
+  F:\ballon\BallonsTranslator-baseline-6155f9b\ballontranslator\utils\io_utils.py:22: DeprecationWarning: `np.bool8` is a deprecated alias for `np.bool_`.  (Deprecated NumPy 1.24)
+    NP_BOOL_TYPES = (np.bool_, np.bool8)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_lazy_metadata.py::LazyMetadataTests::test_current_lazy_registry_metadata_is_complete
+FAILED tests/test_lazy_metadata.py::LazyMetadataTests::test_safe_selector_helper_output_is_preserved
+FAILED tests/test_llm_profiles.py::LLMProfileMigrationTest::test_program_config_load_merges_current_builtin_defaults
+SUBFAILED(provider='Gemini') tests/test_llm_profiles.py::LLMProfileMigrationTest::test_vision_enabled_builtins_default_to_auto_detail
+FAILED tests/test_llm_profiles.py::SecretStoreTest::test_saved_config_roundtrips_inpaint_llm_profile_selection
+FAILED tests/test_llm_profiles.py::SecretStoreTest::test_saved_config_roundtrips_ocr_llm_profile_selection
+FAILED tests/test_llm_profiles.py::SecretStoreTest::test_saved_profiles_roundtrip_without_provider
+7 failed, 159 passed, 1 skipped, 1 warning, 7 subtests passed in 2.22s
+
+--- stderr ---

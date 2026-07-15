@@ -1,0 +1,9 @@
+label=changed-production-syntax-compile
+cwd=F:\ballon\BallonsTranslator
+environment_overrides={"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": "F:\\ballon\\.pr1238-test-deps", "QT_QPA_PLATFORM": "offscreen"}
+command=["F:\\python\\python.exe", "-c", "import pathlib, sys\nfor name in sys.argv[1:]:\n    path = pathlib.Path(name)\n    compile(path.read_bytes(), str(path), 'exec')\n", "ballontranslator/ui/canvas.py", "ballontranslator/ui/fontformat_commands.py", "ballontranslator/ui/mainwindow.py", "ballontranslator/ui/scene_textlayout.py", "ballontranslator/ui/scenetext_manager.py", "ballontranslator/ui/text_advanced_format.py", "ballontranslator/ui/text_glyph_renderer.py", "ballontranslator/ui/text_panel.py", "ballontranslator/ui/text_transform.py", "ballontranslator/ui/textedit_commands.py", "ballontranslator/ui/texteditshapecontrol.py", "ballontranslator/ui/textitem.py", "ballontranslator/utils/fontformat.py", "ballontranslator/utils/proj_imgtrans.py"]
+exit_code=0
+expected_exit_codes=[0]
+--- stdout ---
+
+--- stderr ---
