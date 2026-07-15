@@ -2,6 +2,7 @@ import copy
 import os
 import sys
 import unittest
+import weakref
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ from ballontranslator.ui.mainwindow import (
     MainWindow,
     _apply_global_text_transforms,
 )
+from ballontranslator.ui.module_manager import ModuleManager
 from ballontranslator.utils.config import pcfg
 from ballontranslator.utils.fontformat import FontFormat
 from ballontranslator.utils.textblock import TextBlock
@@ -60,8 +62,10 @@ class _FakeProject:
     def __init__(self, pages):
         self.pages = pages
         self._names = list(pages)
+        self._progress = {name: 0 for name in pages}
         self.saved = 0
         self.current_page = None
+        self.is_all_pages_no_text = True
 
     @property
     def num_pages(self):
@@ -76,6 +80,12 @@ class _FakeProject:
     def set_current_img_byidx(self, index):
         self.current_page = index
 
+    def set_page_progress(self, page_name, value):
+        self._progress[page_name] = value
+
+    def get_page_progress(self, page_name):
+        return self._progress[page_name]
+
     def save(self):
         self.saved += 1
 
@@ -88,9 +98,55 @@ class _FakePageList:
         raise AssertionError('the focused fake page should not change')
 
 
+class _FakeRunDialog:
+    Question = object()
+    YesRole = object()
+    AcceptRole = object()
+    RejectRole = object()
+    next_choice = 'Cancel'
+
+    def __init__(self, _parent):
+        self._buttons = {}
+
+    def setIcon(self, _icon):
+        pass
+
+    def setWindowTitle(self, _title):
+        pass
+
+    def setText(self, _text):
+        pass
+
+    def addButton(self, text, _role):
+        button = object()
+        self._buttons[text] = button
+        return button
+
+    def setDefaultButton(self, _button):
+        pass
+
+    def exec_(self):
+        pass
+
+    def clickedButton(self):
+        return self._buttons[self.next_choice]
+
+
+class _FakeSignal:
+    def __init__(self):
+        self.calls = 0
+
+    def emit(self):
+        self.calls += 1
+
+
 class _PipelineHarness:
     _matching_backup_fontformats = MainWindow._matching_backup_fontformats
     _warn_textstyle_preserve_fallback = MainWindow._warn_textstyle_preserve_fallback
+    _clear_imgtrans_run_state = MainWindow._clear_imgtrans_run_state
+    run_imgtrans = MainWindow.run_imgtrans
+    run_imgtrans_wo_textstyle_update = MainWindow.run_imgtrans_wo_textstyle_update
+    on_run_imgtrans = MainWindow.on_run_imgtrans
 
     def __init__(self, blocks, global_format):
         self.imgtrans_proj = _FakeProject({'page.png': blocks})
@@ -100,16 +156,36 @@ class _PipelineHarness:
         self.st_manager = SimpleNamespace(
             auto_textlayout_flag=False,
             textblk_item_list=[],
+            updateTextBlkList=lambda: None,
             updateSceneTextitems=lambda: None,
         )
         self.canvas = SimpleNamespace(updateCanvas=lambda: None)
         self.pageList = _FakePageList()
         self.backup_blkstyles = []
-        self._backup_blkstyle_block_ids = []
+        self._backup_blkstyle_block_refs = []
         self._textstyle_preserve_warning_pages = set()
         self._run_imgtrans_wo_textstyle_update = False
+        self.postprocess_mt_toggle = True
         self.postprocess_calls = 0
         self.saved_current_pages = 0
+        self.pipeline_launches = []
+        self.bottomBar = SimpleNamespace(
+            textblockChecker=SimpleNamespace(
+                isChecked=lambda: False,
+                click=lambda: None,
+            )
+        )
+        self.module_manager = SimpleNamespace(
+            runImgtransPipeline=self._record_pipeline_launch
+        )
+
+    def _record_pipeline_launch(self, pages):
+        self.pipeline_launches.append(pages)
+        return True
+
+    @staticmethod
+    def tr(text):
+        return text
 
     def postprocess_translations(self, _blocks):
         self.postprocess_calls += 1
@@ -135,6 +211,7 @@ class TextTransformTranslationPipelineTests(unittest.TestCase):
         'enable_ocr',
         'enable_translate',
         'enable_inpaint',
+        'keep_exist_textlines',
     )
 
     def setUp(self):
@@ -151,6 +228,7 @@ class TextTransformTranslationPipelineTests(unittest.TestCase):
         pcfg.module.enable_ocr = False
         pcfg.module.enable_translate = True
         pcfg.module.enable_inpaint = False
+        pcfg.module.keep_exist_textlines = False
 
     def tearDown(self):
         for name, value in self._program_values.items():
@@ -381,6 +459,7 @@ class TextTransformTranslationPipelineTests(unittest.TestCase):
         harness = _PipelineHarness([block], global_format)
         harness._run_imgtrans_wo_textstyle_update = True
         harness.backup_blkstyles = [[backup]]
+        harness._backup_blkstyle_block_refs = [(weakref.ref(block),)]
 
         self._run_page(harness)
 
@@ -425,14 +504,18 @@ class TextTransformTranslationPipelineTests(unittest.TestCase):
         cases = (
             ('missing backup', [], []),
             ('count mismatch', [[backup, backup.deepcopy()]], []),
-            ('identity mismatch', [[backup]], [(0,)]),
+            ('identity mismatch', [[backup]], 'mismatch'),
         )
         for name, backups, identity_pages in cases:
             block = TextBlock(fontformat=backup.deepcopy())
             harness = _PipelineHarness([block], global_format)
             harness._run_imgtrans_wo_textstyle_update = True
             harness.backup_blkstyles = backups
-            harness._backup_blkstyle_block_ids = identity_pages
+            harness._backup_blkstyle_block_refs = (
+                [(weakref.ref(TextBlock()),)]
+                if identity_pages == 'mismatch'
+                else identity_pages
+            )
             with self.subTest(name=name), patch.object(
                 mainwindow_module.LOGGER, 'warning'
             ) as warning:
@@ -444,6 +527,73 @@ class TextTransformTranslationPipelineTests(unittest.TestCase):
                 )
                 self.assert_effects_equal(block.fontformat, global_format)
                 warning.assert_called_once()
+
+    def test_preserve_identity_requires_the_same_live_objects(self):
+        block = TextBlock(fontformat=FontFormat(font_family='Original'))
+        backup = block.fontformat.deepcopy()
+        harness = _PipelineHarness([block], FontFormat())
+        harness.backup_blkstyles = [[backup]]
+        harness._backup_blkstyle_block_refs = [(weakref.ref(block),)]
+
+        self.assertIs(
+            harness._matching_backup_fontformats(0, [block])[0],
+            backup,
+        )
+        replacement = TextBlock(fontformat=block.fontformat.deepcopy())
+        self.assertIsNone(
+            harness._matching_backup_fontformats(0, [replacement])
+        )
+
+    def test_preserve_identity_rejects_missing_and_dead_references(self):
+        current = TextBlock(fontformat=FontFormat(font_family='Current'))
+        harness = _PipelineHarness([current], FontFormat())
+        harness.backup_blkstyles = [[current.fontformat.deepcopy()]]
+
+        self.assertIsNone(harness._matching_backup_fontformats(0, [current]))
+        expired = TextBlock(fontformat=FontFormat(font_family='Expired'))
+        expired_ref = weakref.ref(expired)
+        del expired
+        self.assertIsNone(expired_ref())
+        harness._backup_blkstyle_block_refs = [(expired_ref,)]
+        self.assertIsNone(harness._matching_backup_fontformats(0, [current]))
+
+    def test_detect_replacement_with_same_count_uses_normal_fallback(self):
+        pcfg.module.enable_detect = True
+        pcfg.module.keep_exist_textlines = False
+        pcfg.let_fnteffect_flag = 1
+        original = TextBlock(
+            fontformat=FontFormat(
+                opacity=0.27,
+                horizontal_scale=0.8,
+                vertical_scale=1.35,
+                slant_angle=-18,
+                glyph_slant_angle=-12,
+            )
+        )
+        global_format = FontFormat(
+            opacity=0.73,
+            horizontal_scale=1.4,
+            vertical_scale=0.75,
+            slant_angle=17,
+            glyph_slant_angle=-8,
+        )
+        harness = _PipelineHarness([original], global_format)
+        harness._run_imgtrans_wo_textstyle_update = True
+
+        self.assertTrue(harness.on_run_imgtrans())
+        self.assertEqual(harness.imgtrans_proj.pages['page.png'], [])
+        replacement = TextBlock(src_is_vertical=True, fontformat=FontFormat())
+        harness.imgtrans_proj.pages['page.png'] = [replacement]
+
+        with patch.object(mainwindow_module.LOGGER, 'warning') as warning:
+            self._run_page(harness)
+
+        self.assertEqual(
+            replacement.fontformat.text_transform,
+            (1.4, 0.75, 17.0, -8.0),
+        )
+        self.assertEqual(replacement.fontformat.opacity, 0.73)
+        warning.assert_called_once()
 
     def test_inpaint_only_skips_postprocess_and_keeps_full_style(self):
         pcfg.module.enable_detect = False
@@ -496,6 +646,132 @@ class TextTransformTranslationPipelineTests(unittest.TestCase):
 
         self.assertEqual(block.fontformat, original)
         self.assertEqual(harness.postprocess_calls, 0)
+
+    def test_inpaint_only_start_to_finish_preserves_writing_mode_and_style(self):
+        pcfg.module.enable_detect = False
+        pcfg.module.enable_ocr = False
+        pcfg.module.enable_translate = False
+        pcfg.module.enable_inpaint = True
+        original = FontFormat(
+            font_family='Untouched',
+            alignment=2,
+            vertical=True,
+            opacity=0.39,
+            shadow_offset=[2.5, -3.75],
+            gradient_enabled=True,
+            horizontal_scale=0.8,
+            vertical_scale=1.35,
+            slant_angle=-18,
+            glyph_slant_angle=-12,
+        )
+        block = TextBlock(
+            text=['source'],
+            translation='translation',
+            rich_text='<p>translation</p>',
+            src_is_vertical=False,
+            fontformat=original.deepcopy(),
+        )
+        harness = _PipelineHarness([block], FontFormat())
+
+        self.assertTrue(harness.on_run_imgtrans())
+        self.assertEqual(block.fontformat, original)
+        self.assertEqual(block.rich_text, '<p>translation</p>')
+        self._run_page(harness)
+        self.assertEqual(block.fontformat, original)
+        self.assertEqual(block.rich_text, '<p>translation</p>')
+        self.assertEqual(harness.imgtrans_proj.saved, 1)
+
+    def test_preserve_cancel_does_not_leak_into_next_normal_run(self):
+        block = TextBlock(
+            fontformat=FontFormat(
+                horizontal_scale=0.8,
+                vertical_scale=1.35,
+                slant_angle=-18,
+                glyph_slant_angle=-12,
+            )
+        )
+        global_format = FontFormat(
+            horizontal_scale=1.4,
+            vertical_scale=0.75,
+            slant_angle=17,
+            glyph_slant_angle=-8,
+        )
+        harness = _PipelineHarness([block], global_format)
+        harness.imgtrans_proj.is_all_pages_no_text = False
+        _FakeRunDialog.next_choice = 'Cancel'
+
+        with patch.object(mainwindow_module, 'QMessageBox', _FakeRunDialog):
+            self.assertFalse(harness.run_imgtrans_wo_textstyle_update())
+
+        self.assertFalse(harness._run_imgtrans_wo_textstyle_update)
+        self.assertTrue(harness.postprocess_mt_toggle)
+        harness.imgtrans_proj.is_all_pages_no_text = True
+        self.assertTrue(harness.run_imgtrans())
+        self.assertFalse(harness._run_imgtrans_wo_textstyle_update)
+        self._run_page(harness)
+        self.assertEqual(
+            block.fontformat.text_transform,
+            (1.4, 0.75, 17.0, -8.0),
+        )
+
+    def test_preserve_continue_with_no_pages_cleans_invocation_state(self):
+        harness = _PipelineHarness([TextBlock()], FontFormat())
+        harness.imgtrans_proj.is_all_pages_no_text = False
+        harness.imgtrans_proj.set_page_progress('page.png', 1)
+        _FakeRunDialog.next_choice = 'Continue'
+
+        with patch.object(mainwindow_module, 'QMessageBox', _FakeRunDialog):
+            self.assertFalse(harness.run_imgtrans_wo_textstyle_update())
+
+        self.assertFalse(harness._run_imgtrans_wo_textstyle_update)
+        self.assertTrue(harness.postprocess_mt_toggle)
+        self.assertEqual(harness.backup_blkstyles, [])
+        self.assertEqual(harness._backup_blkstyle_block_refs, [])
+        self.assertEqual(harness.pipeline_launches, [])
+
+    def test_preserve_synchronous_launch_failure_cleans_invocation_state(self):
+        harness = _PipelineHarness([TextBlock()], FontFormat())
+
+        def fail_launch(_pages):
+            raise RuntimeError('synthetic launch failure')
+
+        harness.module_manager.runImgtransPipeline = fail_launch
+        with self.assertRaisesRegex(RuntimeError, 'synthetic launch failure'):
+            harness.run_imgtrans_wo_textstyle_update()
+
+        self.assertFalse(harness._run_imgtrans_wo_textstyle_update)
+        self.assertTrue(harness.postprocess_mt_toggle)
+        self.assertEqual(harness.backup_blkstyles, [])
+        self.assertEqual(harness._backup_blkstyle_block_refs, [])
+
+    def test_empty_project_emits_pipeline_finished_and_reports_no_start(self):
+        finished = _FakeSignal()
+        hidden = []
+        manager = SimpleNamespace(
+            imgtrans_proj=SimpleNamespace(is_empty=True),
+            progress_msgbox=SimpleNamespace(hide=lambda: hidden.append(True)),
+            imgtrans_pipeline_finished=finished,
+        )
+
+        self.assertFalse(ModuleManager.runImgtransPipeline(manager))
+        self.assertEqual(finished.calls, 1)
+        self.assertEqual(hidden, [True])
+
+    def test_async_module_preparation_failure_emits_pipeline_finished(self):
+        finished = _FakeSignal()
+
+        def fail_preparation(_modules, _on_success, on_failure):
+            on_failure()
+
+        manager = SimpleNamespace(
+            imgtrans_proj=SimpleNamespace(is_empty=False, num_pages=1),
+            imgtrans_pipeline_finished=finished,
+            terminateRunningThread=lambda: None,
+            _prepare_modules_then=fail_preparation,
+        )
+
+        self.assertTrue(ModuleManager.runImgtransPipeline(manager))
+        self.assertEqual(finished.calls, 1)
 
 
 if __name__ == '__main__':

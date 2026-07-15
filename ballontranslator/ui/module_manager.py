@@ -1847,7 +1847,8 @@ class ModuleManager(QObject):
         if self.imgtrans_proj.is_empty:
             LOGGER.info('proj file is empty, nothing to do')
             self.progress_msgbox.hide()
-            return
+            self.imgtrans_pipeline_finished.emit()
+            return False
         self.last_finished_index = -1
         self.terminateRunningThread()
         
@@ -1855,7 +1856,7 @@ class ModuleManager(QObject):
             for ii in range(self.imgtrans_proj.num_pages):
                 self.page_trans_finished.emit(ii)
             self.imgtrans_pipeline_finished.emit()
-            return
+            return True
 
         required_modules = []
         if cfg_module.enable_detect:
@@ -1869,8 +1870,9 @@ class ModuleManager(QObject):
         self._prepare_modules_then(
             required_modules,
             lambda: self._startImgtransPipeline(pages_to_process),
-            on_failure=lambda: self.imgtrans_pipeline_finished.emit() if shared.HEADLESS else None,
+            on_failure=self.imgtrans_pipeline_finished.emit,
         )
+        return True
 
     def _startImgtransPipeline(self, pages_to_process=None):
         if self.prepare_msgbox is not None and self.prepare_msgbox.isVisible():

@@ -191,12 +191,7 @@ def _canonical_v2_block_transform(
         )
     fontformat = block['fontformat']
 
-    forbidden_block_fields = (
-        'horizontal_scale',
-        'vertical_scale',
-        'italic_angle',
-        'glyph_slant_angle',
-    )
+    forbidden_block_fields = (*_CANONICAL_TRANSFORM_FIELDS, 'italic_angle')
     for field_name in forbidden_block_fields:
         if field_name in block:
             raise InvalidTextTransformPayloadError(

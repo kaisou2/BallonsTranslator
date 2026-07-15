@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 from functools import partial
 import time
+import weakref
 
 from tqdm import tqdm
 from qtpy.QtWidgets import QAction, QFileDialog, QMenu, QHBoxLayout, QVBoxLayout, QApplication, QStackedWidget, QSplitter, QListWidget, QShortcut, QListWidgetItem, QMessageBox, QTextEdit, QPlainTextEdit, QDialog
@@ -112,6 +113,15 @@ def _apply_global_text_effects(
     target.gradient_size = global_format.gradient_size
 
 
+def _is_inpaint_only_run() -> bool:
+    """Return whether the current pipeline request can only alter pixels."""
+    return pcfg.module.enable_inpaint and not (
+        pcfg.module.enable_detect
+        or pcfg.module.enable_ocr
+        or pcfg.module.enable_translate
+    )
+
+
 class MainWindow(mainwindow_cls):
 
     imgtrans_proj: ProjImgTrans = ProjImgTrans()
@@ -151,7 +161,7 @@ class MainWindow(mainwindow_cls):
         shared.register_view_widget = self.register_view_widget
 
         self.backup_blkstyles = []
-        self._backup_blkstyle_block_ids = []
+        self._backup_blkstyle_block_refs = []
         self._run_imgtrans_wo_textstyle_update = False
         self._textstyle_preserve_warning_pages = set()
 
@@ -1556,11 +1566,15 @@ class MainWindow(mainwindow_cls):
         if page_key == self.imgtrans_proj.current_img:
             self.st_manager.updateTranslation()
 
-    def on_imgtrans_pipeline_finished(self):
+    def _clear_imgtrans_run_state(self):
         self.backup_blkstyles.clear()
-        self._backup_blkstyle_block_ids.clear()
+        self._backup_blkstyle_block_refs.clear()
         self._run_imgtrans_wo_textstyle_update = False
+        self._textstyle_preserve_warning_pages.clear()
         self.postprocess_mt_toggle = True
+
+    def on_imgtrans_pipeline_finished(self):
+        self._clear_imgtrans_run_state()
         if pcfg.module.empty_runcache and not shared.HEADLESS:
             self.module_manager.unload_all_models()
         if shared.args.export_translation_txt:
@@ -1568,7 +1582,9 @@ class MainWindow(mainwindow_cls):
         if shared.args.export_source_txt:
             self.on_export_txt('source')
         if shared.HEADLESS:
-            self.run_next_dir()
+            # Some terminal paths emit the finished signal synchronously.
+            # Queue the next directory so a long run cannot recurse per page.
+            QTimer.singleShot(0, self.run_next_dir)
 
     def postprocess_translations(self, blk_list: List[TextBlock]) -> None:
         src_is_cjk = is_cjk(pcfg.module.translate_source)
@@ -1603,11 +1619,18 @@ class MainWindow(mainwindow_cls):
         if fontformats is None or len(fontformats) != len(blk_list):
             return None
 
-        identity_pages = getattr(self, '_backup_blkstyle_block_ids', ())
-        if page_index < len(identity_pages):
-            expected_ids = identity_pages[page_index]
-            if expected_ids is not None and expected_ids != tuple(map(id, blk_list)):
-                return None
+        identity_pages = getattr(self, '_backup_blkstyle_block_refs', ())
+        if page_index >= len(identity_pages):
+            return None
+        expected_refs = identity_pages[page_index]
+        if expected_refs is None or (
+            len(expected_refs) != len(blk_list)
+            or any(
+                expected_ref() is not block
+                for expected_ref, block in zip(expected_refs, blk_list)
+            )
+        ):
+            return None
         return fontformats
 
     def _warn_textstyle_preserve_fallback(self, page_index: int) -> None:
@@ -1630,12 +1653,7 @@ class MainWindow(mainwindow_cls):
         blk_list = self.imgtrans_proj.get_blklist_byidx(page_index)
         ffmt_list = self._matching_backup_fontformats(page_index, blk_list)
 
-        inpaint_only = pcfg.module.enable_inpaint
-        inpaint_only = inpaint_only and not (
-            pcfg.module.enable_detect
-            or pcfg.module.enable_ocr
-            or pcfg.module.enable_translate
-        )
+        inpaint_only = _is_inpaint_only_run()
         # Inpaint-only must not run translation postprocessing because that
         # path can change writing mode and alignment for non-CJK targets.
         if not inpaint_only:
@@ -1773,7 +1791,8 @@ class MainWindow(mainwindow_cls):
             pcfg.display_lang = lang
             self.set_display_lang(lang)
     
-    def run_imgtrans(self):
+    def run_imgtrans(self, preserve_textstyle=False):
+        continue_mode = False
         if not self.imgtrans_proj.is_all_pages_no_text and not pcfg.module.keep_exist_textlines:
             # 创建自定义消息框，添加"继续运行"选项
             msgBox = QMessageBox(self)
@@ -1791,26 +1810,31 @@ class MainWindow(mainwindow_cls):
             
             clicked_button = msgBox.clickedButton()
             if clicked_button == cancel_btn:
-                return  # 取消，不执行任何操作
+                return False  # 取消，不执行任何操作
             elif clicked_button == continue_btn:
                 # 继续运行：只处理没有文本的页面
-                self.on_run_imgtrans(continue_mode=True)
-                return
+                continue_mode = True
             # 如果是 restart_btn，继续执行下面的代码（重新运行）
-        self.on_run_imgtrans()
+        # Only an accepted request owns invocation state. A canceled dialog
+        # must not disturb either the idle defaults or an active pipeline.
+        self._clear_imgtrans_run_state()
+        self._run_imgtrans_wo_textstyle_update = bool(preserve_textstyle)
+        try:
+            started = self.on_run_imgtrans(continue_mode=continue_mode)
+        except Exception:
+            self._clear_imgtrans_run_state()
+            raise
+        if not started:
+            self._clear_imgtrans_run_state()
+        return started
 
     def run_imgtrans_wo_textstyle_update(self):
-        self._run_imgtrans_wo_textstyle_update = True
-        self.run_imgtrans()
+        return self.run_imgtrans(preserve_textstyle=True)
 
     def on_run_imgtrans(self, continue_mode=False):
         self.backup_blkstyles.clear()
-        self._backup_blkstyle_block_ids.clear()
+        self._backup_blkstyle_block_refs.clear()
         self._textstyle_preserve_warning_pages.clear()
-
-        if self.bottomBar.textblockChecker.isChecked():
-            self.bottomBar.textblockChecker.click()
-        self.postprocess_mt_toggle = False
 
         all_disabled = pcfg.module.all_stages_disabled()
         
@@ -1822,10 +1846,13 @@ class MainWindow(mainwindow_cls):
                 if not self.imgtrans_proj.get_page_progress(page_name):
                     pages_to_process.append(page_name)
             if len(pages_to_process) == 0:
-                return
+                return False
         else:
             for page_name in self.imgtrans_proj.pages:
                 self.imgtrans_proj.set_page_progress(page_name, 0)
+
+        if self.bottomBar.textblockChecker.isChecked():
+            self.bottomBar.textblockChecker.click()
 
         if not pcfg.module.enable_detect:
             self.st_manager.updateTextBlkList()
@@ -1834,7 +1861,7 @@ class MainWindow(mainwindow_cls):
         # object identities and counts later prevents index-based style guesses.
         if self._run_imgtrans_wo_textstyle_update:
             self.backup_blkstyles.extend([None] * self.imgtrans_proj.num_pages)
-            self._backup_blkstyle_block_ids.extend(
+            self._backup_blkstyle_block_refs.extend(
                 [None] * self.imgtrans_proj.num_pages
             )
             for page_index, (page_name, blklist) in enumerate(
@@ -1845,8 +1872,8 @@ class MainWindow(mainwindow_cls):
                 self.backup_blkstyles[page_index] = [
                     textblock.fontformat.deepcopy() for textblock in blklist
                 ]
-                self._backup_blkstyle_block_ids[page_index] = tuple(
-                    map(id, blklist)
+                self._backup_blkstyle_block_refs[page_index] = tuple(
+                    weakref.ref(textblock) for textblock in blklist
                 )
         
         if pcfg.module.enable_detect:
@@ -1857,6 +1884,7 @@ class MainWindow(mainwindow_cls):
                         self.imgtrans_proj.pages[page].clear()
         else:
             textblk: TextBlock = None
+            inpaint_only = _is_inpaint_only_run()
             for page_name, blklist in self.imgtrans_proj.pages.items():
                 # 如果指定了pages_to_process，跳过不需要处理的页面
                 if pages_to_process and page_name not in pages_to_process:
@@ -1870,10 +1898,19 @@ class MainWindow(mainwindow_cls):
                         textblk.set_font_colors((0, 0, 0), (0, 0, 0))
                     if pcfg.module.enable_translate or (all_disabled and not self._run_imgtrans_wo_textstyle_update) or pcfg.module.enable_ocr:
                         textblk.rich_text = ''
-                    textblk.vertical = textblk.src_is_vertical
+                    if not inpaint_only:
+                        textblk.vertical = textblk.src_is_vertical
         
         # 如果有指定pages_to_process或者是continue_mode，则传递页面列表
-        self.module_manager.runImgtransPipeline(pages_to_process if (pages_to_process or continue_mode) else None)
+        self.postprocess_mt_toggle = False
+        try:
+            started = self.module_manager.runImgtransPipeline(
+                pages_to_process if (pages_to_process or continue_mode) else None
+            )
+        except Exception:
+            self._clear_imgtrans_run_state()
+            raise
+        return started is not False
 
     def on_transpanel_changed(self):
         self.canvas.editor_index = self.rightComicTransStackPanel.currentIndex()

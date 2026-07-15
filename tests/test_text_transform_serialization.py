@@ -226,6 +226,7 @@ class TextTransformSerializationTest(unittest.TestCase):
         for field_name in (
             'horizontal_scale',
             'vertical_scale',
+            'slant_angle',
             'italic_angle',
             'glyph_slant_angle',
         ):
@@ -697,6 +698,31 @@ class TextTransformSerializationTest(unittest.TestCase):
                 'fontformat': canonical_v2_fontformat(
                     glyph_slant_angle=45.000001
                 )
+            },
+            root_version=2,
+        )
+
+        with self.assertRaises(InvalidTextTransformPayloadError):
+            project.load_from_dict(source)
+
+        self.assertIs(project.pages, old_pages)
+        self.assertIs(project._image_info, old_info)
+        self.assertEqual(project.current_img, 'existing.png')
+        self.assertIs(project.text_transform_migration_warnings, old_warnings)
+
+    def test_top_level_v2_box_slant_does_not_mutate_existing_project_state(self):
+        project = ProjImgTrans()
+        old_pages = {'existing.png': [TextBlock(translation='keep me')]}
+        old_info = {'existing.png': {'finish_code': 7}}
+        old_warnings = ['keep existing warning state']
+        project.pages = old_pages
+        project._image_info = old_info
+        project.current_img = 'existing.png'
+        project.text_transform_migration_warnings = old_warnings
+        source = project_payload(
+            {
+                'fontformat': canonical_v2_fontformat(slant_angle=12.0),
+                'slant_angle': 12.0,
             },
             root_version=2,
         )
