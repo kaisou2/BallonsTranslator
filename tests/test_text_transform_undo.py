@@ -1,7 +1,16 @@
 import os
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
+from qtpy import API_NAME, QT_VERSION
+
+from ballontranslator.utils import shared as C
+
+C.FLAG_QT6 = QT_VERSION.startswith('6')
+C.USE_PYSIDE6 = API_NAME == 'PySide6'
 
 try:
     from qtpy.QtWidgets import QApplication, QGraphicsScene, QUndoStack
@@ -9,11 +18,17 @@ except ImportError:
     from qtpy.QtGui import QUndoStack
     from qtpy.QtWidgets import QApplication, QGraphicsScene
 
+from qtpy.QtCore import QPointF, QRectF
 from qtpy.QtGui import QColor, QFont, QTextCharFormat, QTextCursor, QTextDocument
 
+from ballontranslator.ui.canvas import MoveByKeyCommand
 from ballontranslator.ui.textedit_commands import (
     ApplyFontformatCommand,
+    AutoLayoutCommand,
+    MoveBlkItemsCommand,
+    ResetAngleCommand,
     SetTextTransformCommand,
+    SqueezeCommand,
     TextItemEditCommand,
     utf16_code_unit_length,
 )
@@ -38,10 +53,16 @@ class FakeTextItem:
         horizontal_scale,
         vertical_scale,
         slant_angle,
+        glyph_slant_angle=None,
         *,
         preview=False,
     ):
-        self.transform = (horizontal_scale, vertical_scale, slant_angle)
+        self.transform = (
+            horizontal_scale,
+            vertical_scale,
+            slant_angle,
+            0.0 if glyph_slant_angle is None else glyph_slant_angle,
+        )
         self.calls.append((self.transform, preview))
 
 
@@ -74,15 +95,15 @@ class TrackingShapeControl:
 class SetTextTransformCommandTest(unittest.TestCase):
     def test_multi_item_command_is_atomic_and_restores_only_transforms(self):
         items = [
-            FakeTextItem((1.0, 1.0, 0.0)),
-            FakeTextItem((0.5, 2.0, -10.0)),
+            FakeTextItem((1.0, 1.0, 0.0, 3.0)),
+            FakeTextItem((0.5, 2.0, -10.0, -4.0)),
         ]
         snapshots = [(item.html, item.rect, item.pos) for item in items]
         refreshes = []
         command = SetTextTransformCommand(
             items,
-            [(1.0, 1.0, -0.0), (0.5, 2.0, -10.0)],
-            [(1.23456789, 0.01, 90.0), (5.0, 3.0, -50.0)],
+            [(1.0, 1.0, -0.0, 3.0), (0.5, 2.0, -10.0, -4.0)],
+            [(1.23456789, 0.01, 90.0, 99.0), (5.0, 3.0, -50.0, -99.0)],
             lambda: refreshes.append('refresh'),
         )
 
@@ -91,18 +112,18 @@ class SetTextTransformCommandTest(unittest.TestCase):
 
         self.assertEqual(stack.count(), 1)
         self.assertEqual(command.childCount(), 0)
-        self.assertEqual(items[0].transform, (1.234568, 0.1, 45.0))
-        self.assertEqual(items[1].transform, (4.0, 3.0, -45.0))
+        self.assertEqual(items[0].transform, (1.234568, 0.1, 85.0, 45.0))
+        self.assertEqual(items[1].transform, (4.0, 3.0, -50.0, -45.0))
         self.assertEqual(refreshes, ['refresh'])
 
         stack.undo()
-        self.assertEqual(items[0].transform, (1.0, 1.0, 0.0))
-        self.assertEqual(items[1].transform, (0.5, 2.0, -10.0))
+        self.assertEqual(items[0].transform, (1.0, 1.0, 0.0, 3.0))
+        self.assertEqual(items[1].transform, (0.5, 2.0, -10.0, -4.0))
         self.assertEqual(refreshes, ['refresh', 'refresh'])
 
         stack.redo()
-        self.assertEqual(items[0].transform, (1.234568, 0.1, 45.0))
-        self.assertEqual(items[1].transform, (4.0, 3.0, -45.0))
+        self.assertEqual(items[0].transform, (1.234568, 0.1, 85.0, 45.0))
+        self.assertEqual(items[1].transform, (4.0, 3.0, -50.0, -45.0))
         self.assertEqual(refreshes, ['refresh', 'refresh', 'refresh'])
         self.assertTrue(all(not preview for item in items for _, preview in item.calls))
         self.assertEqual(
@@ -110,12 +131,12 @@ class SetTextTransformCommandTest(unittest.TestCase):
         )
 
     def test_create_returns_none_when_normalized_values_match(self):
-        item = FakeTextItem((4.0, 0.1, -45.0))
+        item = FakeTextItem((4.0, 0.1, -85.0, 45.0))
 
         command = SetTextTransformCommand.create(
             [item],
-            [(4.0, 0.1, -45.0)],
-            [(99.0, 0.0, -99.0)],
+            [(4.0, 0.1, -85.0, 45.0)],
+            [(99.0, 0.0, -99.0, 99.0)],
         )
 
         self.assertIsNone(command)
@@ -124,17 +145,17 @@ class SetTextTransformCommandTest(unittest.TestCase):
     def test_rejects_mismatched_per_item_state(self):
         with self.assertRaisesRegex(ValueError, 'same length'):
             SetTextTransformCommand(
-                [FakeTextItem((1.0, 1.0, 0.0))],
+                [FakeTextItem((1.0, 1.0, 0.0, 0.0))],
                 [],
-                [(1.0, 1.0, 0.0)],
+                [(1.0, 1.0, 0.0, 0.0)],
             )
 
     def test_undo_then_new_transform_clears_redo_branch(self):
-        item = FakeTextItem((1.0, 1.0, 0.0))
+        item = FakeTextItem((1.0, 1.0, 0.0, 0.0))
         stack = QUndoStack()
         stack.push(
             SetTextTransformCommand(
-                [item], [(1.0, 1.0, 0.0)], [(1.5, 1.0, 0.0)]
+                [item], [(1.0, 1.0, 0.0, 0.0)], [(1.5, 1.0, 0.0, 7.0)]
             )
         )
         stack.undo()
@@ -142,22 +163,103 @@ class SetTextTransformCommandTest(unittest.TestCase):
 
         stack.push(
             SetTextTransformCommand(
-                [item], [(1.0, 1.0, 0.0)], [(1.0, 0.75, 5.0)]
+                [item], [(1.0, 1.0, 0.0, 0.0)], [(1.0, 0.75, 5.0, -12.0)]
             )
         )
         self.assertFalse(stack.canRedo())
         self.assertEqual(stack.count(), 1)
-        self.assertEqual(item.transform, (1.0, 0.75, 5.0))
+        self.assertEqual(item.transform, (1.0, 0.75, 5.0, -12.0))
 
     def test_normalized_noop_never_enters_stack_or_calls_item(self):
-        item = FakeTextItem((1.2, 1.0, 0.0))
+        item = FakeTextItem((1.2, 1.0, 0.0, 0.0))
         stack = QUndoStack()
         command = SetTextTransformCommand.create(
-            [item], [(1.2, 1.0, 0.0)], [(1.20000001, 1.0, -0.0)]
+            [item],
+            [(1.2, 1.0, 0.0, 0.0)],
+            [(1.20000001, 1.0, -0.0, -0.0)],
         )
         self.assertIsNone(command)
         self.assertEqual(stack.count(), 0)
         self.assertEqual(item.calls, [])
+
+
+class LogicalMoveCommandTest(unittest.TestCase):
+    @staticmethod
+    def make_item():
+        block = TextBlock(
+            xyxy=[25, 35, 165, 105],
+            _bounding_rect=[25, 35, 140, 70],
+            translation='logical move',
+            fontformat=FontFormat(stroke_width=0.08),
+        )
+        item = TextBlkItem(block)
+        scene = QGraphicsScene()
+        scene.addItem(item)
+        return scene, item
+
+    def assertPointAlmostEqual(self, actual, expected):
+        self.assertAlmostEqual(actual.x(), expected.x(), places=6)
+        self.assertAlmostEqual(actual.y(), expected.y(), places=6)
+
+    def test_drag_command_is_padding_independent_and_refreshes_once(self):
+        _scene, item = self.make_item()
+        before = QPointF(item.logical_position())
+        after = before + QPointF(37, -19)
+        refreshes = []
+        stack = QUndoStack()
+        stack.push(
+            MoveBlkItemsCommand(
+                [item],
+                before_positions=[before],
+                after_positions=[after],
+                overlay_sync=lambda: refreshes.append('sync'),
+            )
+        )
+        self.assertPointAlmostEqual(item.logical_position(), after)
+        self.assertEqual(refreshes, ['sync'])
+
+        item.setPadding(item.padding() + 11.0)
+        self.assertPointAlmostEqual(item.logical_position(), after)
+        stack.undo()
+        self.assertPointAlmostEqual(item.logical_position(), before)
+        stack.redo()
+        self.assertPointAlmostEqual(item.logical_position(), after)
+        self.assertEqual(refreshes, ['sync', 'sync', 'sync'])
+
+    def test_arrow_command_is_padding_independent(self):
+        _scene, item = self.make_item()
+        before = QPointF(item.logical_position())
+        delta = QPointF(-4, 7)
+        refreshes = []
+        stack = QUndoStack()
+        stack.push(
+            MoveByKeyCommand(
+                [item],
+                delta,
+                TrackingShapeControl(item),
+                lambda: refreshes.append('sync'),
+            )
+        )
+        self.assertPointAlmostEqual(item.logical_position(), before + delta)
+        item.setPadding(item.padding() + 9.0)
+        stack.undo()
+        self.assertPointAlmostEqual(item.logical_position(), before)
+        stack.redo()
+        self.assertPointAlmostEqual(item.logical_position(), before + delta)
+        self.assertEqual(refreshes, ['sync', 'sync', 'sync'])
+
+    def test_noop_drag_command_does_not_enter_stack(self):
+        _scene, item = self.make_item()
+        position = QPointF(item.logical_position())
+        stack = QUndoStack()
+        stack.push(
+            MoveBlkItemsCommand(
+                [item],
+                before_positions=[position],
+                after_positions=[position],
+            )
+        )
+        self.assertEqual(stack.count(), 0)
 
 
 class Utf16CodeUnitLengthTest(unittest.TestCase):
@@ -168,6 +270,35 @@ class Utf16CodeUnitLengthTest(unittest.TestCase):
 
 
 class ApplyFontformatCommandTest(unittest.TestCase):
+    def test_overlay_manager_callback_runs_once_per_apply_undo_redo(self):
+        block = TextBlock(
+            xyxy=[0, 0, 120, 60],
+            _bounding_rect=[0, 0, 120, 60],
+            translation='overlay sync',
+            fontformat=FontFormat(),
+        )
+        item = TextBlkItem(block)
+        scene = QGraphicsScene()
+        scene.addItem(item)
+        refreshes = []
+        target = item.fontformat.deepcopy()
+        target.slant_angle = 18.0
+        stack = QUndoStack()
+
+        stack.push(
+            ApplyFontformatCommand(
+                [item],
+                [FakeTransEdit()],
+                target,
+                TrackingShapeControl(item),
+                lambda: refreshes.append('sync'),
+            )
+        )
+        stack.undo()
+        stack.redo()
+
+        self.assertEqual(refreshes, ['sync', 'sync', 'sync'])
+
     def test_prior_text_edit_survives_whole_format_undo_redo_chain(self):
         block = TextBlock(
             xyxy=[0, 0, 160, 70],
@@ -214,6 +345,7 @@ class ApplyFontformatCommandTest(unittest.TestCase):
         target.horizontal_scale = 1.4
         target.vertical_scale = 0.7
         target.slant_angle = -12.0
+        target.glyph_slant_angle = 16.0
         stack.push(ApplyFontformatCommand([item], [edit], target))
 
         self.assertEqual(stack.count(), 2)
@@ -236,7 +368,9 @@ class ApplyFontformatCommandTest(unittest.TestCase):
         self.assertEqual(edit.document().toPlainText(), 'before!')
         stack.redo()
         self.assertTrue(item.fontformat.vertical)
-        self.assertEqual(item.fontformat.text_transform, (1.4, 0.7, -12.0))
+        self.assertEqual(
+            item.fontformat.text_transform, (1.4, 0.7, -12.0, 16.0)
+        )
 
     def test_empty_documents_restore_exact_cursor_and_block_formats(self):
         for formatted in (False, True):
@@ -291,6 +425,7 @@ class ApplyFontformatCommandTest(unittest.TestCase):
                     horizontal_scale=1.6,
                     vertical_scale=0.65,
                     slant_angle=-13.0,
+                    glyph_slant_angle=9.0,
                 )
                 stack = QUndoStack()
                 stack.push(
@@ -448,7 +583,7 @@ class ApplyFontformatCommandTest(unittest.TestCase):
         scene = QGraphicsScene()
         items = []
         for index, transform in enumerate(
-            ((1.0, 1.0, 0.0), (0.8, 1.3, 11.0))
+            ((1.0, 1.0, 0.0, 5.0), (0.8, 1.3, 11.0, -6.0))
         ):
             block = TextBlock(
                 xyxy=[index * 140, 0, index * 140 + 120, 60],
@@ -458,6 +593,7 @@ class ApplyFontformatCommandTest(unittest.TestCase):
                     horizontal_scale=transform[0],
                     vertical_scale=transform[1],
                     slant_angle=transform[2],
+                    glyph_slant_angle=transform[3],
                 ),
             )
             item = TextBlkItem(block)
@@ -478,6 +614,7 @@ class ApplyFontformatCommandTest(unittest.TestCase):
             horizontal_scale=1.6,
             vertical_scale=0.65,
             slant_angle=-9.0,
+            glyph_slant_angle=14.0,
         )
         stack = QUndoStack()
 
@@ -492,7 +629,9 @@ class ApplyFontformatCommandTest(unittest.TestCase):
         self.assertEqual(stack.count(), 1)
         for item in items:
             self.assertTrue(item.fontformat.vertical)
-            self.assertEqual(item.fontformat.text_transform, (1.6, 0.65, -9.0))
+            self.assertEqual(
+                item.fontformat.text_transform, (1.6, 0.65, -9.0, 14.0)
+            )
 
         stack.undo()
         for item, state in zip(items, before):
@@ -504,7 +643,9 @@ class ApplyFontformatCommandTest(unittest.TestCase):
         stack.redo()
         for item in items:
             self.assertTrue(item.fontformat.vertical)
-            self.assertEqual(item.fontformat.text_transform, (1.6, 0.65, -9.0))
+            self.assertEqual(
+                item.fontformat.text_transform, (1.6, 0.65, -9.0, 14.0)
+            )
 
     def test_uniform_noop_is_removed_from_undo_stack(self):
         block = TextBlock(
@@ -553,6 +694,7 @@ class ApplyFontformatCommandTest(unittest.TestCase):
             horizontal_scale=1.15,
             vertical_scale=0.85,
             slant_angle=7.0,
+            glyph_slant_angle=-6.0,
         )
         rich_text = (
             '<html><body><p>'
@@ -601,6 +743,7 @@ class ApplyFontformatCommandTest(unittest.TestCase):
         target.horizontal_scale = 1.8
         target.vertical_scale = 0.55
         target.slant_angle = -18.0
+        target.glyph_slant_angle = 21.0
 
         shape_control = TrackingShapeControl(item)
         command = ApplyFontformatCommand(
@@ -612,7 +755,9 @@ class ApplyFontformatCommandTest(unittest.TestCase):
         self.assertEqual(command.childCount(), 0)
         self.assertEqual(shape_control.refresh_count, 1)
         self.assertTrue(item.fontformat.vertical)
-        self.assertEqual(item.fontformat.text_transform, (1.8, 0.55, -18.0))
+        self.assertEqual(
+            item.fontformat.text_transform, (1.8, 0.55, -18.0, 21.0)
+        )
         self.assertEqual(
             (item.textCursor().position(), item.textCursor().anchor()),
             before_cursor,
@@ -629,6 +774,10 @@ class ApplyFontformatCommandTest(unittest.TestCase):
                 stack.undo()
                 self.assertEqual(item.toHtml(), before_html)
                 self.assertEqual(item.fontformat, before_format)
+                self.assertEqual(
+                    item.fontformat.text_transform,
+                    (1.15, 0.85, 7.0, -6.0),
+                )
                 self.assertEqual(item.absBoundingRect(qrect=True), before_rect)
                 self.assertEqual(item.pos(), before_position)
                 self.assertEqual(item.transform(), before_transform)
@@ -641,6 +790,10 @@ class ApplyFontformatCommandTest(unittest.TestCase):
                 stack.redo()
                 self.assertEqual(item.toHtml(), after_html)
                 self.assertEqual(item.fontformat, after_format)
+                self.assertEqual(
+                    item.fontformat.text_transform,
+                    (1.8, 0.55, -18.0, 21.0),
+                )
                 self.assertEqual(item.absBoundingRect(qrect=True), after_rect)
                 self.assertEqual(item.pos(), after_position)
                 self.assertEqual(item.transform(), after_transform)
@@ -650,6 +803,52 @@ class ApplyFontformatCommandTest(unittest.TestCase):
                 )
 
         self.assertEqual(shape_control.refresh_count, 5)
+
+
+class GeometryCommandOverlaySyncTest(unittest.TestCase):
+    @staticmethod
+    def _item():
+        item = Mock()
+        item.absBoundingRect.return_value = QRectF(1, 2, 30, 40)
+        item.toHtml.return_value = '<p>new</p>'
+        item.toPlainText.return_value = 'plain'
+        item.fontformat = SimpleNamespace(letter_spacing=1)
+        item.rotation.return_value = 27.0
+        return item
+
+    def test_geometry_commands_sync_once_at_each_undo_boundary(self):
+        factories = (
+            lambda item, callback: AutoLayoutCommand(
+                [item],
+                [QRectF(0, 0, 20, 20)],
+                ['<p>old</p>'],
+                [Mock()],
+                callback,
+            ),
+            lambda item, callback: SqueezeCommand(
+                [item],
+                SimpleNamespace(blk_item=None, updateBoundingRect=Mock()),
+                callback,
+            ),
+            lambda item, callback: ResetAngleCommand(
+                [item],
+                SimpleNamespace(
+                    blk_item=None,
+                    setAngle=Mock(),
+                    updateBoundingRect=Mock(),
+                ),
+                callback,
+            ),
+        )
+        for factory in factories:
+            with self.subTest(command=factory):
+                item = self._item()
+                refreshes = []
+                stack = QUndoStack()
+                stack.push(factory(item, lambda: refreshes.append('sync')))
+                stack.undo()
+                stack.redo()
+                self.assertEqual(refreshes, ['sync', 'sync', 'sync'])
 
 
 if __name__ == '__main__':

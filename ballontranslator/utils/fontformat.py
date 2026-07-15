@@ -1,4 +1,4 @@
-from typing import Union
+from typing import NamedTuple, Union
 import enum
 import math
 import re
@@ -12,9 +12,24 @@ from .structures import Tuple, Union, List, Dict, Config, field, nested_dataclas
 
 TEXT_TRANSFORM_SCALE_MIN = 0.1
 TEXT_TRANSFORM_SCALE_MAX = 4.0
-TEXT_TRANSFORM_SLANT_MIN = -45.0
-TEXT_TRANSFORM_SLANT_MAX = 45.0
+TEXT_TRANSFORM_BOX_SLANT_MIN = -85.0
+TEXT_TRANSFORM_BOX_SLANT_MAX = 85.0
+TEXT_TRANSFORM_GLYPH_SLANT_MIN = -45.0
+TEXT_TRANSFORM_GLYPH_SLANT_MAX = 45.0
+# Public compatibility aliases retain the original names but now describe the
+# box-level shear, not the independent glyph-local slant.
+TEXT_TRANSFORM_SLANT_MIN = TEXT_TRANSFORM_BOX_SLANT_MIN
+TEXT_TRANSFORM_SLANT_MAX = TEXT_TRANSFORM_BOX_SLANT_MAX
 TEXT_TRANSFORM_PRECISION = 6
+
+
+class TextTransform(NamedTuple):
+    """Canonical post-layout box transform plus glyph-local slant."""
+
+    horizontal_scale: float
+    vertical_scale: float
+    slant_angle: float
+    glyph_slant_angle: float
 
 
 def normalize_text_transform_value(value: float, minimum: float, maximum: float) -> float:
@@ -45,13 +60,17 @@ def normalize_text_transform(
     horizontal_scale: float,
     vertical_scale: float,
     slant_angle: float,
-) -> Tuple[float, float, float]:
-    """Normalize the canonical ``(horizontal, vertical, slant)`` tuple.
+    glyph_slant_angle: float = 0.0,
+) -> TextTransform:
+    """Normalize the canonical four-component text transform.
 
-    >>> normalize_text_transform(1.23456789, 0.01, -90)
-    (1.234568, 0.1, -45.0)
+    Existing three-argument callers remain source-compatible and receive a
+    neutral glyph slant.
+
+    >>> tuple(normalize_text_transform(1.23456789, 0.01, -90))
+    (1.234568, 0.1, -85.0, 0.0)
     """
-    return (
+    return TextTransform(
         normalize_text_transform_value(
             horizontal_scale, TEXT_TRANSFORM_SCALE_MIN, TEXT_TRANSFORM_SCALE_MAX
         ),
@@ -59,7 +78,14 @@ def normalize_text_transform(
             vertical_scale, TEXT_TRANSFORM_SCALE_MIN, TEXT_TRANSFORM_SCALE_MAX
         ),
         normalize_text_transform_value(
-            slant_angle, TEXT_TRANSFORM_SLANT_MIN, TEXT_TRANSFORM_SLANT_MAX
+            slant_angle,
+            TEXT_TRANSFORM_BOX_SLANT_MIN,
+            TEXT_TRANSFORM_BOX_SLANT_MAX,
+        ),
+        normalize_text_transform_value(
+            glyph_slant_angle,
+            TEXT_TRANSFORM_GLYPH_SLANT_MIN,
+            TEXT_TRANSFORM_GLYPH_SLANT_MAX,
         ),
     )
 
@@ -144,6 +170,7 @@ class FontFormat(Config):
     horizontal_scale: float = 1.0
     vertical_scale: float = 1.0
     slant_angle: float = 0.0
+    glyph_slant_angle: float = 0.0
 
     deprecated_attributes: dict = field(default_factory = lambda: dict())
 
@@ -166,19 +193,22 @@ class FontFormat(Config):
             self.horizontal_scale,
             self.vertical_scale,
             self.slant_angle,
+            self.glyph_slant_angle,
         ) = normalize_text_transform(
             self.horizontal_scale,
             self.vertical_scale,
             self.slant_angle,
+            self.glyph_slant_angle,
         )
         self.deprecated_attributes = {}
 
     @property
-    def text_transform(self) -> Tuple[float, float, float]:
-        return (
+    def text_transform(self) -> TextTransform:
+        return TextTransform(
             self.horizontal_scale,
             self.vertical_scale,
             self.slant_angle,
+            self.glyph_slant_angle,
         )
 
     def deepcopy(self):

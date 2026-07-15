@@ -12,7 +12,11 @@ from ballontranslator.ui.text_transform import (
     text_transform_matrix,
     text_transform_point,
 )
-from ballontranslator.utils.fontformat import FontFormat, normalize_text_transform
+from ballontranslator.utils.fontformat import (
+    FontFormat,
+    TextTransform,
+    normalize_text_transform,
+)
 
 
 class TextTransformNormalizationTest(unittest.TestCase):
@@ -20,35 +24,50 @@ class TextTransformNormalizationTest(unittest.TestCase):
     def test_fontformat_uses_canonical_neutral_defaults(self):
         fontformat = FontFormat()
 
-        self.assertEqual(fontformat.text_transform, (1.0, 1.0, 0.0))
+        self.assertIsInstance(fontformat.text_transform, TextTransform)
+        self.assertEqual(fontformat.text_transform, (1.0, 1.0, 0.0, 0.0))
         self.assertEqual(fontformat.horizontal_scale, 1.0)
         self.assertEqual(fontformat.vertical_scale, 1.0)
         self.assertEqual(fontformat.slant_angle, 0.0)
+        self.assertEqual(fontformat.glyph_slant_angle, 0.0)
 
     def test_normalization_clamps_and_uses_six_decimal_precision(self):
         self.assertEqual(
-            normalize_text_transform(1.23456789, 0.01, 90.0),
-            (1.234568, 0.1, 45.0),
+            normalize_text_transform(1.23456789, 0.01, 90.0, 90.0),
+            (1.234568, 0.1, 85.0, 45.0),
         )
         self.assertEqual(
-            normalize_text_transform(9.0, 4.000001, -90.0),
-            (4.0, 4.0, -45.0),
+            normalize_text_transform(9.0, 4.000001, -90.0, -90.0),
+            (4.0, 4.0, -85.0, -45.0),
+        )
+        self.assertEqual(
+            normalize_text_transform(1.0, 1.0, 12.0),
+            (1.0, 1.0, 12.0, 0.0),
         )
 
     def test_normalization_canonicalizes_negative_zero(self):
-        angle = normalize_text_transform(1.0, 1.0, -0.0)[2]
+        values = normalize_text_transform(-0.0, -0.0, -0.0, -0.0)
 
-        self.assertEqual(angle, 0.0)
-        self.assertEqual(math.copysign(1.0, angle), 1.0)
+        self.assertEqual(values, (0.1, 0.1, 0.0, 0.0))
+        for angle in values[2:]:
+            self.assertEqual(math.copysign(1.0, angle), 1.0)
 
     def test_normalization_rejects_each_nonfinite_component(self):
-        for component in range(3):
+        for component in range(4):
             for value in (math.nan, math.inf, -math.inf):
-                values = [1.0, 1.0, 0.0]
+                values = [1.0, 1.0, 0.0, 0.0]
                 values[component] = value
                 with self.subTest(component=component, value=value):
                     with self.assertRaisesRegex(ValueError, 'finite numbers'):
                         normalize_text_transform(*values)
+
+    def test_normalization_rejects_bool_in_every_component(self):
+        for component in range(4):
+            values = [1.0, 1.0, 0.0, 0.0]
+            values[component] = True
+            with self.subTest(component=component):
+                with self.assertRaisesRegex(ValueError, 'finite numbers'):
+                    normalize_text_transform(*values)
 
 
 class TextTransformMatrixTest(unittest.TestCase):
@@ -60,8 +79,10 @@ class TextTransformMatrixTest(unittest.TestCase):
         ('maximum_vertical', 1.0, 4.0, 0.0),
         ('wide_and_short', 4.0, 0.1, 0.0),
         ('narrow_and_tall', 0.1, 4.0, 0.0),
-        ('negative_slant_limit', 1.0, 1.0, -45.0),
-        ('positive_slant_limit', 1.0, 1.0, 45.0),
+        ('negative_slant_limit', 1.0, 1.0, -85.0),
+        ('positive_slant_limit', 1.0, 1.0, 85.0),
+        ('maximum_scales_negative_slant', 4.0, 4.0, -85.0),
+        ('maximum_scales_positive_slant', 4.0, 4.0, 85.0),
         ('nonuniform_with_slant', 2.75, 0.4, 33.25),
     )
 

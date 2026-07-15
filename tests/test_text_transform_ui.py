@@ -13,33 +13,69 @@ from ballontranslator.ui.text_advanced_format import (
     CommittedTransformControl,
     TextAdvancedFormatPanel,
 )
-from ballontranslator.utils.fontformat import FontFormat
+from ballontranslator.utils.fontformat import (
+    FontFormat,
+    TEXT_TRANSFORM_BOX_SLANT_MAX,
+    TEXT_TRANSFORM_BOX_SLANT_MIN,
+    TEXT_TRANSFORM_GLYPH_SLANT_MAX,
+    TEXT_TRANSFORM_GLYPH_SLANT_MIN,
+    TEXT_TRANSFORM_SCALE_MAX,
+    TEXT_TRANSFORM_SCALE_MIN,
+)
 from ballontranslator.utils import shared as app_shared
 
 
 _APP = QApplication.instance() or QApplication([])
 
 
-def item_with_transform(horizontal=1.0, vertical=1.0, slant=0.0):
+def item_with_transform(
+    horizontal=1.0, vertical=1.0, slant=0.0, glyph_slant=0.0
+):
     return SimpleNamespace(
         blk=SimpleNamespace(
             fontformat=FontFormat(
                 horizontal_scale=horizontal,
                 vertical_scale=vertical,
                 slant_angle=slant,
+                glyph_slant_angle=glyph_slant,
             )
         )
     )
 
 
 class CommittedTransformControlTest(unittest.TestCase):
-    def make_control(self, percentage=True):
+    def make_control(self, kind='scale'):
+        specs = {
+            'scale': (
+                'Scale',
+                'horizontal_scale',
+                100.0,
+                TEXT_TRANSFORM_SCALE_MIN,
+                TEXT_TRANSFORM_SCALE_MAX,
+                '%',
+            ),
+            'box': (
+                'Box Slant',
+                'slant_angle',
+                1.0,
+                TEXT_TRANSFORM_BOX_SLANT_MIN,
+                TEXT_TRANSFORM_BOX_SLANT_MAX,
+                '\N{DEGREE SIGN}',
+            ),
+            'glyph': (
+                'Glyph Slant',
+                'glyph_slant_angle',
+                1.0,
+                TEXT_TRANSFORM_GLYPH_SLANT_MIN,
+                TEXT_TRANSFORM_GLYPH_SLANT_MAX,
+                '\N{DEGREE SIGN}',
+            ),
+        }
         control = CommittedTransformControl(
-            'Scale' if percentage else 'Angle',
-            'horizontal_scale' if percentage else 'slant_angle',
-            percentage,
+            *specs[kind],
+            1.0,
         )
-        control.set_model_value(1.0 if percentage else 0.0)
+        control.set_model_value(1.0 if kind == 'scale' else 0.0)
         return control
 
     def test_percentage_display_and_all_accepted_inputs(self):
@@ -156,7 +192,7 @@ class CommittedTransformControlTest(unittest.TestCase):
         self.assertEqual(control.editor.text(), '100.0%')
 
     def test_angle_uses_degree_format_and_finite_range(self):
-        control = self.make_control(percentage=False)
+        control = self.make_control('box')
         self.assertEqual(control.editor.text(), '0.0\N{DEGREE SIGN}')
         commits = []
         control.commit_requested.connect(lambda _name, value: commits.append(value))
@@ -166,11 +202,35 @@ class CommittedTransformControlTest(unittest.TestCase):
         self.assertEqual(commits, [-17.25])
         self.assertEqual(control.editor.text(), '-17.2\N{DEGREE SIGN}')
 
-        for invalid in ('nan', 'inf', '-46', '46'):
+        for invalid in ('nan', 'inf', '-86', '86'):
             control.editor.setText(invalid)
             control._on_text_edited()
             self.assertFalse(control.commit_pending())
         self.assertEqual(commits, [-17.25])
+
+    def test_box_and_glyph_angles_have_independent_ranges(self):
+        box = self.make_control('box')
+        glyph = self.make_control('glyph')
+
+        box.editor.setText('85')
+        box._on_text_edited()
+        self.assertTrue(box.commit_pending())
+        self.assertEqual(box.editor.text(), '85.0\N{DEGREE SIGN}')
+
+        box.editor.setText('90')
+        box._on_text_edited()
+        self.assertFalse(box.commit_pending())
+        self.assertEqual(box.editor.text(), '85.0\N{DEGREE SIGN}')
+
+        glyph.editor.setText('45')
+        glyph._on_text_edited()
+        self.assertTrue(glyph.commit_pending())
+        self.assertEqual(glyph.editor.text(), '45.0\N{DEGREE SIGN}')
+
+        glyph.editor.setText('46')
+        glyph._on_text_edited()
+        self.assertFalse(glyph.commit_pending())
+        self.assertEqual(glyph.editor.text(), '45.0\N{DEGREE SIGN}')
 
 
 class TextAdvancedFormatPanelTransformTest(unittest.TestCase):
@@ -185,8 +245,8 @@ class TextAdvancedFormatPanelTransformTest(unittest.TestCase):
 
     def test_mixed_selection_and_precise_refresh_are_model_views_only(self):
         panel = self.make_panel()
-        first = item_with_transform(1.234567, 0.5, -7.0)
-        second = item_with_transform(1.5, 0.5, 3.0)
+        first = item_with_transform(1.234567, 0.5, -7.0, 12.0)
+        second = item_with_transform(1.5, 0.5, 3.0, 12.0)
         commits = []
         panel.transform_commit_requested.connect(lambda *args: commits.append(args))
 
@@ -199,12 +259,32 @@ class TextAdvancedFormatPanelTransformTest(unittest.TestCase):
         self.assertEqual(panel.horizontal_scale_control.editor.text(), '\N{EM DASH}')
         self.assertEqual(panel.vertical_scale_control.editor.text(), '50.0%')
         self.assertEqual(panel.slant_angle_control.editor.text(), '\N{EM DASH}')
+        self.assertEqual(
+            panel.glyph_slant_angle_control.editor.text(),
+            '12.0\N{DEGREE SIGN}',
+        )
         self.assertEqual(commits, [])
 
         panel.horizontal_scale_control.editor.setText('120.00%')
         panel.horizontal_scale_control._on_text_edited()
         panel.finish_pending_transform_edits()
         self.assertEqual(commits, [('horizontal_scale', 1.2)])
+
+    def test_panel_exposes_fixed_box_and_glyph_source_labels(self):
+        panel = self.make_panel()
+        self.assertEqual(panel.slant_angle_control.label.text(), 'Box Slant')
+        self.assertEqual(
+            panel.glyph_slant_angle_control.label.text(), 'Glyph Slant'
+        )
+        self.assertEqual(
+            tuple(panel.transform_controls),
+            (
+                'horizontal_scale',
+                'vertical_scale',
+                'slant_angle',
+                'glyph_slant_angle',
+            ),
+        )
 
     def test_selection_boundary_commits_pending_value_before_refresh(self):
         panel = self.make_panel()

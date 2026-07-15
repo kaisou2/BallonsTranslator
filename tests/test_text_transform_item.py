@@ -38,11 +38,12 @@ class TrackingTextBlkItem(TextBlkItem):
         return super().updateMicroFocus()
 
 
-def make_item(transform=(1.5, 0.75, 12.0)):
+def make_item(transform=(1.5, 0.75, 12.0, 0.0)):
     fontformat = FontFormat(
         horizontal_scale=transform[0],
         vertical_scale=transform[1],
         slant_angle=transform[2],
+        glyph_slant_angle=transform[3],
     )
     block = TextBlock(
         xyxy=[10, 20, 110, 70],
@@ -175,7 +176,9 @@ class TextTransformItemTests(unittest.TestCase):
         self.assertPointAlmostEqual(item.transformOriginPoint(), logical.center())
         self.assertEqual(
             item.transform(),
-            text_transform_matrix(*block.fontformat.text_transform, logical.center()),
+            text_transform_matrix(
+                *block.fontformat.text_transform[:3], logical.center()
+            ),
         )
 
         polygon = item.visual_polygon_in_scene()
@@ -218,7 +221,9 @@ class TextTransformItemTests(unittest.TestCase):
         self.assertEqual(block.fontformat.text_transform, original_tuple)
 
         self.assertTrue(item.set_text_transform(2.0, 0.5, -5.0))
-        self.assertEqual(block.fontformat.text_transform, (2.0, 0.5, -5.0))
+        self.assertEqual(
+            block.fontformat.text_transform, (2.0, 0.5, -5.0, 0.0)
+        )
         calls_after_commit = item.transform_calls
         self.assertFalse(item.set_text_transform(2.0, 0.5, -5.0))
         self.assertEqual(item.transform_calls, calls_after_commit)
@@ -228,7 +233,7 @@ class TextTransformItemTests(unittest.TestCase):
         self.assertEqual(item.documentSize(), original_size)
 
     def test_rotation_is_separate_and_cache_tracks_visual_transform(self):
-        item, _ = make_item(transform=(1.0, 1.0, 0.0))
+        item, _ = make_item(transform=(1.0, 1.0, 0.0, 0.0))
         self.assertTrue(item.transform().isIdentity())
         self.assertEqual(
             item.cacheMode(), QGraphicsItem.CacheMode.DeviceCoordinateCache
@@ -256,7 +261,7 @@ class TextTransformItemTests(unittest.TestCase):
         self.assertEqual(item.cacheMode(), QGraphicsItem.CacheMode.NoCache)
 
     def test_manager_copy_paste_deep_copies_transform_and_command_keeps_it(self):
-        original_transform = (1.65, 0.55, -17.0)
+        original_transform = (1.65, 0.55, -17.0, 11.0)
         source, _ = make_item(transform=original_transform)
         manager = _CopyPasteManager(source)
 
@@ -275,7 +280,10 @@ class TextTransformItemTests(unittest.TestCase):
         source.set_text_transform(horizontal_scale=0.8)
         source.set_text_transform(vertical_scale=1.9)
         source.set_text_transform(slant_angle=23.0)
-        self.assertEqual(source.fontformat.text_transform, (0.8, 1.9, 23.0))
+        source.set_text_transform(glyph_slant_angle=-9.0)
+        self.assertEqual(
+            source.fontformat.text_transform, (0.8, 1.9, 23.0, -9.0)
+        )
         self.assertEqual(
             clipboard_block.fontformat.text_transform,
             original_transform,
@@ -298,15 +306,15 @@ class TextTransformItemTests(unittest.TestCase):
         self.assertEqual(
             pasted.transform(),
             text_transform_matrix(
-                *original_transform,
+                *original_transform[:3],
                 pasted.logical_unpadded_rect().center(),
             ),
         )
         self.assertEqual(manager.formatpanel.calls[-1], ((pasted,), {}))
 
         # Neither later source edits nor clipboard edits may alias the pasted
-        # item's three independent canonical fields.
-        source.set_text_transform(0.95, 0.85, -4.0)
+        # item's four independent canonical fields.
+        source.set_text_transform(0.95, 0.85, -4.0, -3.0)
         self.assertEqual(
             clipboard_block.fontformat.text_transform,
             original_transform,
@@ -315,6 +323,7 @@ class TextTransformItemTests(unittest.TestCase):
         clipboard_block.fontformat.horizontal_scale = 3.25
         clipboard_block.fontformat.vertical_scale = 0.25
         clipboard_block.fontformat.slant_angle = 31.0
+        clipboard_block.fontformat.glyph_slant_angle = -27.0
         self.assertEqual(pasted.fontformat.text_transform, original_transform)
 
         manager.canvas.undo_stack.undo()
@@ -322,7 +331,7 @@ class TextTransformItemTests(unittest.TestCase):
         self.assertNotIn(pasted_pair, manager.pairwidget_list)
         self.assertEqual(pasted.fontformat.text_transform, original_transform)
 
-        source.set_text_transform(1.1, 1.2, 7.0)
+        source.set_text_transform(1.1, 1.2, 7.0, 8.0)
         manager.canvas.undo_stack.redo()
         self.assertIs(manager.textblk_item_list[1], pasted)
         self.assertIs(manager.pairwidget_list[1], pasted_pair)
@@ -330,7 +339,7 @@ class TextTransformItemTests(unittest.TestCase):
         self.assertEqual(
             pasted.transform(),
             text_transform_matrix(
-                *original_transform,
+                *original_transform[:3],
                 pasted.logical_unpadded_rect().center(),
             ),
         )

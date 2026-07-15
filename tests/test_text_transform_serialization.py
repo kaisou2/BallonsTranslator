@@ -3,6 +3,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 import unittest
 import warnings
 
@@ -48,7 +49,12 @@ from ballontranslator.utils.proj_imgtrans import (
     UnsupportedTextTransformVersionError,
     migrate_text_transform_payload,
 )
-from ballontranslator.utils.fontformat import FontFormat
+from ballontranslator.utils import config as config_module
+from ballontranslator.utils.fontformat import (
+    FontFormat,
+    TextTransform,
+    normalize_text_transform,
+)
 from ballontranslator.utils.textblock import TextBlock
 
 
@@ -68,7 +74,19 @@ def canonical_transform(block):
         fontformat['horizontal_scale'],
         fontformat['vertical_scale'],
         fontformat['slant_angle'],
+        fontformat['glyph_slant_angle'],
     )
+
+
+def canonical_v2_fontformat(**overrides):
+    fontformat = {
+        'horizontal_scale': 1.0,
+        'vertical_scale': 1.0,
+        'slant_angle': 0.0,
+        'glyph_slant_angle': 0.0,
+    }
+    fontformat.update(overrides)
+    return fontformat
 
 
 def resolved_font(char_format, default_font):
@@ -146,6 +164,206 @@ def replace_stretch_metadata(html, runs):
 
 class TextTransformSerializationTest(unittest.TestCase):
 
+    def test_text_transform_named_tuple_order_defaults_and_three_arg_compatibility(self):
+        transform = FontFormat().text_transform
+
+        self.assertIsInstance(transform, TextTransform)
+        self.assertEqual(transform, (1.0, 1.0, 0.0, 0.0))
+        self.assertEqual(
+            transform._fields,
+            (
+                'horizontal_scale',
+                'vertical_scale',
+                'slant_angle',
+                'glyph_slant_angle',
+            ),
+        )
+        self.assertEqual(
+            normalize_text_transform(1.25, 0.75, 60.0),
+            (1.25, 0.75, 60.0, 0.0),
+        )
+        self.assertEqual(
+            normalize_text_transform(9.0, 0.01, 90.0, -90.0),
+            (4.0, 0.1, 85.0, -45.0),
+        )
+
+        for component in range(4):
+            for invalid in (True, math.nan, math.inf, -math.inf):
+                values = [1.0, 1.0, 0.0, 0.0]
+                values[component] = invalid
+                with self.subTest(component=component, invalid=invalid):
+                    with self.assertRaises(ValueError):
+                        normalize_text_transform(*values)
+
+    def test_schema_v2_requires_all_four_canonical_fontformat_fields(self):
+        for missing in (
+            'horizontal_scale',
+            'vertical_scale',
+            'slant_angle',
+            'glyph_slant_angle',
+        ):
+            fontformat = canonical_v2_fontformat()
+            fontformat.pop(missing)
+            source = project_payload(
+                {'fontformat': fontformat}, root_version=2
+            )
+            with self.subTest(missing=missing):
+                with self.assertRaisesRegex(
+                    InvalidTextTransformPayloadError, 'required in schema v2'
+                ):
+                    migrate_text_transform_payload(source)
+
+        for invalid_fontformat in (None, [], 'bad'):
+            source = project_payload(
+                {'fontformat': invalid_fontformat}, root_version=2
+            )
+            with self.subTest(fontformat=invalid_fontformat):
+                with self.assertRaises(InvalidTextTransformPayloadError):
+                    migrate_text_transform_payload(source)
+
+    def test_schema_v2_rejects_aliases_markers_and_top_level_transform_fields(self):
+        cases = []
+        for field_name in (
+            'horizontal_scale',
+            'vertical_scale',
+            'italic_angle',
+            'glyph_slant_angle',
+        ):
+            block = {'fontformat': canonical_v2_fontformat()}
+            block[field_name] = 0.0
+            cases.append((f'top-level {field_name}', block))
+        alias_fontformat = canonical_v2_fontformat(italic_angle=0.0)
+        cases.append(('fontformat italic_angle', {'fontformat': alias_fontformat}))
+        cases.append(
+            (
+                'legacy marker',
+                {
+                    'fontformat': canonical_v2_fontformat(),
+                    'rich_text_transform_version': 0,
+                },
+            )
+        )
+
+        for name, block in cases:
+            source = project_payload(block, root_version=2)
+            before = copy.deepcopy(source)
+            with self.subTest(name=name):
+                with self.assertRaises(InvalidTextTransformPayloadError):
+                    migrate_text_transform_payload(source)
+                self.assertEqual(source, before)
+
+    def test_schema_v2_rejects_out_of_range_instead_of_clamping(self):
+        invalid_values = {
+            'horizontal_scale': 4.000001,
+            'vertical_scale': 0.099999,
+            'slant_angle': 85.000001,
+            'glyph_slant_angle': -45.000001,
+        }
+        for field_name, invalid in invalid_values.items():
+            fontformat = canonical_v2_fontformat()
+            fontformat[field_name] = invalid
+            source = project_payload(
+                {'fontformat': fontformat}, root_version=2
+            )
+            with self.subTest(field_name=field_name):
+                with self.assertRaisesRegex(
+                    InvalidTextTransformPayloadError, 'canonical range'
+                ):
+                    migrate_text_transform_payload(source)
+
+    def test_schema_v2_accepts_and_normalizes_valid_canonical_values(self):
+        source = project_payload(
+            {
+                'fontformat': canonical_v2_fontformat(
+                    horizontal_scale=1.23456789,
+                    vertical_scale=4.0,
+                    slant_angle=-85.0,
+                    glyph_slant_angle=-0.0,
+                )
+            },
+            root_version=2,
+        )
+
+        migrated, migration_warnings = migrate_text_transform_payload(source)
+
+        self.assertEqual(migration_warnings, [])
+        self.assertEqual(
+            canonical_transform(migrated['pages']['page.png'][0]),
+            (1.234568, 4.0, -85.0, 0.0),
+        )
+
+    def test_legacy_glyph_field_is_rejected_at_either_location(self):
+        for root_version in (None, 0, 1):
+            for location in ('block', 'fontformat'):
+                block = {'fontformat': {}}
+                if location == 'block':
+                    block['glyph_slant_angle'] = 12.0
+                else:
+                    block['fontformat']['glyph_slant_angle'] = 12.0
+                source = project_payload(block, root_version=root_version)
+                with self.subTest(root_version=root_version, location=location):
+                    with self.assertRaisesRegex(
+                        InvalidTextTransformPayloadError, 'legacy schema'
+                    ):
+                        migrate_text_transform_payload(source)
+
+    def test_legacy_box_range_and_italic_warning_semantics(self):
+        source = {
+            'pages': {
+                'page.png': [
+                    {'fontformat': {'slant_angle': 60.0}},
+                    {'fontformat': {'slant_angle': 90.0}},
+                    {'fontformat': {'italic_angle': -18.0}},
+                    {'italic_angle': -18.0, 'fontformat': {}},
+                ]
+            }
+        }
+
+        migrated, migration_warnings = migrate_text_transform_payload(source)
+        blocks = migrated['pages']['page.png']
+
+        self.assertEqual(canonical_transform(blocks[0]), (1.0, 1.0, 60.0, 0.0))
+        self.assertEqual(canonical_transform(blocks[1]), (1.0, 1.0, 85.0, 0.0))
+        self.assertEqual(canonical_transform(blocks[2]), (1.0, 1.0, -18.0, 0.0))
+        self.assertEqual(canonical_transform(blocks[3]), (1.0, 1.0, -18.0, 0.0))
+        self.assertEqual(
+            sum('legacy italic_angle' in item for item in migration_warnings),
+            1,
+        )
+        self.assertTrue(
+            any('slant_angle was clamped from 90.0 to 85.0' in item
+                for item in migration_warnings)
+        )
+
+    def test_old_and_new_style_preset_round_trip_glyph_slant(self):
+        old_styles = list(config_module.text_styles)
+        old_path = config_module.pcfg.text_styles_path
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                style_path = os.path.join(directory, 'styles.json')
+                with open(style_path, 'w', encoding='utf8') as output:
+                    json.dump([{'_style_name': 'legacy'}], output)
+
+                config_module.load_textstyle_from(style_path, raise_exception=True)
+                self.assertEqual(len(config_module.text_styles), 1)
+                self.assertEqual(
+                    config_module.text_styles[0].glyph_slant_angle, 0.0
+                )
+
+                config_module.text_styles[0].glyph_slant_angle = 12.5
+                config_module.pcfg.text_styles_path = style_path
+                self.assertTrue(config_module.save_text_styles(raise_exception=True))
+                config_module.load_textstyle_from(style_path, raise_exception=True)
+                self.assertEqual(
+                    config_module.text_styles[0].glyph_slant_angle, 12.5
+                )
+                with open(style_path, 'r', encoding='utf8') as saved:
+                    self.assertEqual(json.load(saved)[0]['glyph_slant_angle'], 12.5)
+        finally:
+            config_module.text_styles.clear()
+            config_module.text_styles.extend(old_styles)
+            config_module.pcfg.text_styles_path = old_path
+
     def test_named_migration_fixture_matrix(self):
         upstream, upstream_warnings = migrate_text_transform_payload(
             load_fixture('upstream_legacy.json')
@@ -153,16 +371,19 @@ class TextTransformSerializationTest(unittest.TestCase):
         self.assertEqual(upstream_warnings, [])
         self.assertEqual(
             canonical_transform(upstream['pages']['page.png'][0]),
-            (1.0, 1.0, 0.0),
+            (1.0, 1.0, 0.0, 0.0),
         )
 
         logical, logical_warnings = migrate_text_transform_payload(
             load_fixture('pr1238_logical_v1.json')
         )
-        self.assertEqual(logical_warnings, [])
+        self.assertEqual(
+            logical_warnings,
+            ['legacy italic_angle was interpreted as Box Slant'],
+        )
         self.assertEqual(
             canonical_transform(logical['pages']['page.png'][0]),
-            (1.25, 0.8, 12.5),
+            (1.25, 0.8, 12.5, 0.0),
         )
 
         for exact_name in (
@@ -174,13 +395,13 @@ class TextTransformSerializationTest(unittest.TestCase):
                     load_fixture(exact_name)
                 )
                 self.assertTrue(exact_warnings)
-                self.assertEqual(exact['text_transform_schema_version'], 1)
+                self.assertEqual(exact['text_transform_schema_version'], 2)
 
         with self.assertRaises(AmbiguousLegacyTextTransformError):
             migrate_text_transform_payload(
                 load_fixture('pr1238_effective_v0_ambiguous_stretch.json')
             )
-        for future_name in ('future_root_v2.json', 'future_block_marker_v2.json'):
+        for future_name in ('future_root_v3.json', 'future_block_marker_v2.json'):
             with self.subTest(future_name=future_name):
                 with self.assertRaises(UnsupportedTextTransformVersionError):
                     migrate_text_transform_payload(load_fixture(future_name))
@@ -193,13 +414,17 @@ class TextTransformSerializationTest(unittest.TestCase):
                 horizontal_scale=1.25,
                 vertical_scale=0.75,
                 slant_angle=9.0,
+                glyph_slant_angle=-11.0,
             ),
         )
         duplicate = copy.deepcopy(original)
 
         self.assertIsNot(duplicate, original)
         self.assertIsNot(duplicate.fontformat, original.fontformat)
-        self.assertEqual(duplicate.fontformat.text_transform, (1.25, 0.75, 9.0))
+        self.assertEqual(
+            duplicate.fontformat.text_transform,
+            (1.25, 0.75, 9.0, -11.0),
+        )
         duplicate.fontformat.horizontal_scale = 2.0
         self.assertEqual(original.fontformat.horizontal_scale, 1.25)
 
@@ -224,8 +449,8 @@ class TextTransformSerializationTest(unittest.TestCase):
         block = migrated['pages']['page.png'][0]
         self.assertEqual(source, before)
         self.assertEqual(migration_warnings, [])
-        self.assertEqual(migrated['text_transform_schema_version'], 1)
-        self.assertEqual(canonical_transform(block), (1.0, 1.0, 0.0))
+        self.assertEqual(migrated['text_transform_schema_version'], 2)
+        self.assertEqual(canonical_transform(block), (1.0, 1.0, 0.0, 0.0))
         self.assertEqual(block['rich_text'], html)
         self.assertEqual(block['fontformat']['font_family'], 'Arial')
         self.assertTrue(block['fontformat']['italic'])
@@ -250,7 +475,10 @@ class TextTransformSerializationTest(unittest.TestCase):
         block = migrated['pages']['page.png'][0]
         self.assertEqual(source, before)
         self.assertEqual(migration_warnings, [])
-        self.assertEqual(canonical_transform(block), (1.234568, 0.75, 0.0))
+        self.assertEqual(
+            canonical_transform(block),
+            (1.234568, 0.75, 0.0, 0.0),
+        )
         self.assertEqual(block['rich_text'], html)
 
     def test_failed_logical_marker_one_canonicalizes_aliases_only(self):
@@ -271,8 +499,11 @@ class TextTransformSerializationTest(unittest.TestCase):
         migrated, migration_warnings = migrate_text_transform_payload(source)
 
         block = migrated['pages']['page.png'][0]
-        self.assertEqual(migration_warnings, [])
-        self.assertEqual(canonical_transform(block), (1.25, 0.8, 12.5))
+        self.assertEqual(
+            migration_warnings,
+            ['legacy italic_angle was interpreted as Box Slant'],
+        )
+        self.assertEqual(canonical_transform(block), (1.25, 0.8, 12.5, 0.0))
         self.assertEqual(block['rich_text'], html)
         self.assertTrue(block['fontformat']['underline'])
         self.assertNotIn('italic_angle', block['fontformat'])
@@ -293,8 +524,11 @@ class TextTransformSerializationTest(unittest.TestCase):
         migrated, migration_warnings = migrate_text_transform_payload(source)
 
         block = migrated['pages']['page.png'][0]
-        self.assertEqual(migration_warnings, [])
-        self.assertEqual(canonical_transform(block), (1.6, 0.7, -8.0))
+        self.assertEqual(
+            migration_warnings,
+            ['legacy italic_angle was interpreted as Box Slant'],
+        )
+        self.assertEqual(canonical_transform(block), (1.6, 0.7, -8.0, 0.0))
         self.assertEqual(block['translation'], 'preserved')
         self.assertTrue(block['fontformat']['bold'])
         self.assertNotIn('horizontal_scale', block)
@@ -317,16 +551,22 @@ class TextTransformSerializationTest(unittest.TestCase):
 
     def test_nonnumeric_and_nonfinite_transform_values_are_rejected(self):
         invalid_values = ('1.2', None, True, math.nan, math.inf, -math.inf)
-        for field in ('horizontal_scale', 'vertical_scale', 'slant_angle'):
+        for field in (
+            'horizontal_scale',
+            'vertical_scale',
+            'slant_angle',
+            'glyph_slant_angle',
+        ):
             for invalid in invalid_values:
                 fontformat = {
                     'horizontal_scale': 1.0,
                     'vertical_scale': 1.0,
                     'slant_angle': 0.0,
+                    'glyph_slant_angle': 0.0,
                 }
                 fontformat[field] = invalid
                 source = project_payload(
-                    {'rich_text': '', 'fontformat': fontformat}, root_version=1
+                    {'rich_text': '', 'fontformat': fontformat}, root_version=2
                 )
                 with self.subTest(field=field, invalid=invalid):
                     with self.assertRaises(InvalidTextTransformPayloadError):
@@ -400,7 +640,7 @@ class TextTransformSerializationTest(unittest.TestCase):
             migrated, migration_warnings = migrate_text_transform_payload(source)
 
         block = migrated['pages']['page.png'][0]
-        self.assertEqual(canonical_transform(block), (4.0, 0.1, 45.0))
+        self.assertEqual(canonical_transform(block), (4.0, 0.1, 85.0, 0.0))
         self.assertEqual(len(migration_warnings), 3)
         self.assertEqual(emitted, [])
         self.assertTrue(any('horizontal_scale' in item for item in migration_warnings))
@@ -413,7 +653,7 @@ class TextTransformSerializationTest(unittest.TestCase):
                 'horizontal_scale': 1.5,
                 'fontformat': {'bold': True},
             },
-            root_version=2,
+            root_version=3,
         )
         before = copy.deepcopy(source)
 
@@ -434,7 +674,7 @@ class TextTransformSerializationTest(unittest.TestCase):
         project.img_array = object()
         old_image = project.img_array
 
-        source = project_payload({'rich_text': ''}, root_version=2)
+        source = project_payload({'rich_text': ''}, root_version=3)
         with self.assertRaises(UnsupportedTextTransformVersionError):
             project.load_from_dict(source)
 
@@ -442,6 +682,32 @@ class TextTransformSerializationTest(unittest.TestCase):
         self.assertIs(project._image_info, old_info)
         self.assertEqual(project.current_img, 'existing.png')
         self.assertIs(project.img_array, old_image)
+
+    def test_invalid_schema_v2_does_not_mutate_existing_project_state(self):
+        project = ProjImgTrans()
+        old_pages = {'existing.png': [TextBlock(translation='keep me')]}
+        old_info = {'existing.png': {'finish_code': 7}}
+        old_warnings = ['keep existing warning state']
+        project.pages = old_pages
+        project._image_info = old_info
+        project.current_img = 'existing.png'
+        project.text_transform_migration_warnings = old_warnings
+        source = project_payload(
+            {
+                'fontformat': canonical_v2_fontformat(
+                    glyph_slant_angle=45.000001
+                )
+            },
+            root_version=2,
+        )
+
+        with self.assertRaises(InvalidTextTransformPayloadError):
+            project.load_from_dict(source)
+
+        self.assertIs(project.pages, old_pages)
+        self.assertIs(project._image_info, old_info)
+        self.assertEqual(project.current_img, 'existing.png')
+        self.assertIs(project.text_transform_migration_warnings, old_warnings)
 
     def test_json_boundary_preserves_state_and_original_future_version_cause(self):
         project = ProjImgTrans()
@@ -452,7 +718,7 @@ class TextTransformSerializationTest(unittest.TestCase):
         project.pages = old_pages
         project._image_info = old_info
         project.current_img = 'existing.png'
-        future_path = os.path.join(FIXTURE_DIR, 'future_root_v2.json')
+        future_path = os.path.join(FIXTURE_DIR, 'future_root_v3.json')
 
         with self.assertRaises(ProjectLoadFailureException) as raised:
             project.load_from_json(future_path)
@@ -460,7 +726,7 @@ class TextTransformSerializationTest(unittest.TestCase):
         self.assertIsInstance(
             raised.exception.__cause__, UnsupportedTextTransformVersionError
         )
-        self.assertIn('unsupported text transform schema version 2', str(raised.exception))
+        self.assertIn('unsupported text transform schema version 3', str(raised.exception))
         self.assertEqual(project.directory, 'original-directory')
         self.assertEqual(project.proj_path, 'original-project.json')
         self.assertIs(project.pages, old_pages)
@@ -554,7 +820,7 @@ class TextTransformSerializationTest(unittest.TestCase):
         block = migrated['pages']['page.png'][0]
         serialized = json.dumps(migrated, sort_keys=True)
 
-        self.assertEqual(canonical_transform(block), (1.4, 0.6, 11.0))
+        self.assertEqual(canonical_transform(block), (1.4, 0.6, 11.0, 0.0))
         self.assertNotIn('horizontal_scale', block)
         self.assertNotIn('vertical_scale', block)
         self.assertNotIn('italic_angle', block)
@@ -587,7 +853,7 @@ class TextTransformSerializationTest(unittest.TestCase):
             migrated, migration_warnings = migrate_text_transform_payload(source)
 
         block = migrated['pages']['page.png'][0]
-        self.assertEqual(canonical_transform(block), (3.0, 2.0, 7.0))
+        self.assertEqual(canonical_transform(block), (3.0, 2.0, 7.0, 0.0))
         self.assertEqual(len(migration_warnings), 1)
         self.assertIn('rich_text was restored', migration_warnings[0])
         self.assertEqual(emitted, [])
@@ -866,6 +1132,7 @@ class TextTransformSerializationTest(unittest.TestCase):
                 horizontal_scale=1.234568,
                 vertical_scale=0.625,
                 slant_angle=-14.5,
+                glyph_slant_angle=11.25,
             ),
         )
         source_project = ProjImgTrans()
@@ -886,7 +1153,7 @@ class TextTransformSerializationTest(unittest.TestCase):
         restored_block = restored.not_found_pages['missing.png'][0]
         self.assertEqual(
             restored_block.fontformat.text_transform,
-            (1.234568, 0.625, -14.5),
+            (1.234568, 0.625, -14.5, 11.25),
         )
         self.assertEqual(restored_block.rich_text, block.rich_text)
 

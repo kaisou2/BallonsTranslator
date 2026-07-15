@@ -13,7 +13,17 @@ from qtpy.QtGui import QFont, QTextCharFormat, QTextCursor, QTextDocument
 from .logger import logger as LOGGER
 from .io_utils import find_all_imgs, imread, imwrite, NumpyEncoder
 from .textblock import TextBlock, FontFormat
-from .fontformat import normalize_text_transform, px2pt
+from .fontformat import (
+    TEXT_TRANSFORM_BOX_SLANT_MAX,
+    TEXT_TRANSFORM_BOX_SLANT_MIN,
+    TEXT_TRANSFORM_GLYPH_SLANT_MAX,
+    TEXT_TRANSFORM_GLYPH_SLANT_MIN,
+    TEXT_TRANSFORM_SCALE_MAX,
+    TEXT_TRANSFORM_SCALE_MIN,
+    TextTransform,
+    normalize_text_transform,
+    px2pt,
+)
 from .config import pcfg, RunStatus
 from . import shared
 
@@ -30,8 +40,23 @@ class ImgnameNotInProjectException(Exception):
     pass
 
 
-TEXT_TRANSFORM_SCHEMA_VERSION = 1
+TEXT_TRANSFORM_SCHEMA_VERSION = 2
 _MISSING = object()
+_CANONICAL_TRANSFORM_FIELDS = (
+    'horizontal_scale',
+    'vertical_scale',
+    'slant_angle',
+    'glyph_slant_angle',
+)
+_TRANSFORM_BOUNDS = {
+    'horizontal_scale': (TEXT_TRANSFORM_SCALE_MIN, TEXT_TRANSFORM_SCALE_MAX),
+    'vertical_scale': (TEXT_TRANSFORM_SCALE_MIN, TEXT_TRANSFORM_SCALE_MAX),
+    'slant_angle': (TEXT_TRANSFORM_BOX_SLANT_MIN, TEXT_TRANSFORM_BOX_SLANT_MAX),
+    'glyph_slant_angle': (
+        TEXT_TRANSFORM_GLYPH_SLANT_MIN,
+        TEXT_TRANSFORM_GLYPH_SLANT_MAX,
+    ),
+}
 _LEGACY_STRETCH_PATTERN = re.compile(
     r'<!--\s*ballontranslator-logical-stretch-v1:(.*?)\s*-->', re.DOTALL
 )
@@ -81,12 +106,21 @@ def _payload_number(value, location: str) -> float:
     return value
 
 
-def _block_transform_values(block: dict, location: str, migration_warnings: List[str]):
+def _legacy_block_transform_values(
+    block: dict,
+    location: str,
+    migration_warnings: List[str],
+) -> Tuple[TextTransform, dict, bool]:
     fontformat = block.get('fontformat', {})
     if fontformat is None:
         fontformat = {}
     if not isinstance(fontformat, dict):
         raise InvalidTextTransformPayloadError(f"{location}.fontformat must be an object")
+
+    if 'glyph_slant_angle' in block or 'glyph_slant_angle' in fontformat:
+        raise InvalidTextTransformPayloadError(
+            f"{location} contains glyph_slant_angle in a legacy schema"
+        )
 
     sources = {
         'horizontal_scale': (
@@ -108,6 +142,9 @@ def _block_transform_values(block: dict, location: str, migration_warnings: List
         'vertical_scale': 1.0,
         'slant_angle': 0.0,
     }
+    used_legacy_italic_angle = (
+        'italic_angle' in block or 'italic_angle' in fontformat
+    )
     raw = {}
     for target, candidates in sources.items():
         present = []
@@ -126,18 +163,76 @@ def _block_transform_values(block: dict, location: str, migration_warnings: List
             raw[target] = defaults[target]
 
     normalized = normalize_text_transform(
-        raw['horizontal_scale'], raw['vertical_scale'], raw['slant_angle']
+        raw['horizontal_scale'],
+        raw['vertical_scale'],
+        raw['slant_angle'],
+        0.0,
     )
     for name, value, canonical in zip(
-        ('horizontal_scale', 'vertical_scale', 'slant_angle'), raw.values(), normalized
+        ('horizontal_scale', 'vertical_scale', 'slant_angle'),
+        (raw['horizontal_scale'], raw['vertical_scale'], raw['slant_angle']),
+        normalized[:3],
     ):
-        if value < (0.1 if name != 'slant_angle' else -45.0) or value > (
-            4.0 if name != 'slant_angle' else 45.0
-        ):
+        minimum, maximum = _TRANSFORM_BOUNDS[name]
+        if value < minimum or value > maximum:
             migration_warnings.append(
                 f"{location}.{name} was clamped from {value} to {canonical}"
             )
-    return normalized, fontformat
+    return normalized, fontformat, used_legacy_italic_angle
+
+
+def _canonical_v2_block_transform(
+    block: dict,
+    location: str,
+) -> Tuple[TextTransform, dict]:
+    if 'fontformat' not in block or not isinstance(block['fontformat'], dict):
+        raise InvalidTextTransformPayloadError(
+            f"{location}.fontformat must be an object in schema v2"
+        )
+    fontformat = block['fontformat']
+
+    forbidden_block_fields = (
+        'horizontal_scale',
+        'vertical_scale',
+        'italic_angle',
+        'glyph_slant_angle',
+    )
+    for field_name in forbidden_block_fields:
+        if field_name in block:
+            raise InvalidTextTransformPayloadError(
+                f"{location}.{field_name} is not canonical in schema v2"
+            )
+    if 'italic_angle' in fontformat:
+        raise InvalidTextTransformPayloadError(
+            f"{location}.fontformat.italic_angle is not canonical in schema v2"
+        )
+
+    raw = {}
+    for field_name in _CANONICAL_TRANSFORM_FIELDS:
+        if field_name not in fontformat:
+            raise InvalidTextTransformPayloadError(
+                f"{location}.fontformat.{field_name} is required in schema v2"
+            )
+        value = _payload_number(
+            fontformat[field_name], f"{location}.fontformat.{field_name}"
+        )
+        minimum, maximum = _TRANSFORM_BOUNDS[field_name]
+        if value < minimum or value > maximum:
+            raise InvalidTextTransformPayloadError(
+                f"{location}.fontformat.{field_name} is outside "
+                f"the canonical range [{minimum}, {maximum}]"
+            )
+        raw[field_name] = value
+
+    return (
+        normalize_text_transform(
+            raw['horizontal_scale'],
+            raw['vertical_scale'],
+            raw['slant_angle'],
+            raw['glyph_slant_angle'],
+        ),
+        fontformat,
+    )
 
 
 def _resolved_font(char_format: QTextCharFormat, default_font: QFont) -> QFont:
@@ -415,7 +510,7 @@ def _migrate_effective_legacy_html(
 
 
 def migrate_text_transform_payload(proj_dict: dict):
-    """Return a canonical schema-v1 copy without mutating the input payload."""
+    """Return a canonical schema-v2 copy without mutating the input payload."""
     if not isinstance(proj_dict, dict):
         raise InvalidTextTransformPayloadError("project payload must be an object")
     migrated = copy.deepcopy(proj_dict)
@@ -431,7 +526,8 @@ def migrate_text_transform_payload(proj_dict: dict):
     if not isinstance(pages, dict):
         raise InvalidTextTransformPayloadError("pages must be an object")
 
-    # Reject every future marker before canonicalizing any block in our copy.
+    # Preflight every block before canonicalizing the deep copy. Schema v2 is
+    # strict; legacy v0/v1 keeps only the two historical marker versions.
     for page_name, blocks in pages.items():
         if not isinstance(blocks, list):
             raise InvalidTextTransformPayloadError(f"pages.{page_name} must be a list")
@@ -440,6 +536,13 @@ def migrate_text_transform_payload(proj_dict: dict):
             if not isinstance(block, dict):
                 raise InvalidTextTransformPayloadError(f"{location} must be an object")
             marker_value = block.get('rich_text_transform_version', _MISSING)
+            if root_version == 2:
+                if marker_value is not _MISSING:
+                    raise InvalidTextTransformPayloadError(
+                        f"{location}.rich_text_transform_version is not canonical "
+                        "in schema v2"
+                    )
+                continue
             marker = _payload_version(
                 marker_value,
                 f"{location}.rich_text_transform_version",
@@ -448,20 +551,58 @@ def migrate_text_transform_payload(proj_dict: dict):
                 raise UnsupportedTextTransformVersionError(
                     f"unsupported rich-text transform version {marker} at {location}"
                 )
+            fontformat = block.get('fontformat', {})
+            if (
+                'glyph_slant_angle' in block
+                or (
+                    isinstance(fontformat, dict)
+                    and 'glyph_slant_angle' in fontformat
+                )
+            ):
+                raise InvalidTextTransformPayloadError(
+                    f"{location} contains glyph_slant_angle in a legacy schema"
+                )
 
     migration_warnings = []
+    legacy_italic_angle_warning_emitted = False
     for page_name, blocks in pages.items():
         for index, block in enumerate(blocks):
             location = f"pages.{page_name}[{index}]"
+            if root_version == 2:
+                transform, fontformat = _canonical_v2_block_transform(
+                    block, location
+                )
+                canonical_fontformat = dict(fontformat)
+                canonical_fontformat.update(
+                    zip(_CANONICAL_TRANSFORM_FIELDS, transform)
+                )
+                block['fontformat'] = canonical_fontformat
+                continue
+
             marker_value = block.get('rich_text_transform_version', _MISSING)
             marker = _payload_version(
                 marker_value,
                 f"{location}.rich_text_transform_version",
             )
-            transform, fontformat = _block_transform_values(
-                block, location, migration_warnings
+            transform, fontformat, used_legacy_italic_angle = (
+                _legacy_block_transform_values(
+                    block, location, migration_warnings
+                )
             )
-            horizontal_scale, vertical_scale, slant_angle = transform
+            if (
+                used_legacy_italic_angle
+                and not legacy_italic_angle_warning_emitted
+            ):
+                migration_warnings.append(
+                    "legacy italic_angle was interpreted as Box Slant"
+                )
+                legacy_italic_angle_warning_emitted = True
+            (
+                horizontal_scale,
+                vertical_scale,
+                slant_angle,
+                glyph_slant_angle,
+            ) = transform
 
             # Marker 1 is the failed branch's logical representation. An
             # explicit marker 0 always denotes its effective size/stretch HTML,
@@ -489,11 +630,13 @@ def migrate_text_transform_payload(proj_dict: dict):
                 horizontal_scale=horizontal_scale,
                 vertical_scale=vertical_scale,
                 slant_angle=slant_angle,
+                glyph_slant_angle=glyph_slant_angle,
             )
             block['fontformat'] = canonical_fontformat
             block.pop('horizontal_scale', None)
             block.pop('vertical_scale', None)
             block.pop('italic_angle', None)
+            block.pop('glyph_slant_angle', None)
             block.pop('rich_text_transform_version', None)
 
     migrated['text_transform_schema_version'] = TEXT_TRANSFORM_SCHEMA_VERSION

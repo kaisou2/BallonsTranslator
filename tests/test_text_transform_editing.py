@@ -65,7 +65,9 @@ class TextTransformEditingTest(unittest.TestCase):
         before_pos = QPointF(item.pos())
 
         self.assertTrue(item.set_text_transform(2.0, 0.5, -8.0, preview=True))
-        self.assertEqual(block.fontformat.text_transform, (1.6, 0.7, 13.0))
+        self.assertEqual(
+            block.fontformat.text_transform, (1.6, 0.7, 13.0, 0.0)
+        )
         self.assertTrue(item.set_text_transform(2.0, 0.5, -8.0))
 
         cursor = item.textCursor()

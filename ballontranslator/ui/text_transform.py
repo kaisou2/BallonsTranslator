@@ -1,4 +1,8 @@
-"""Pure helpers for the item-local post-layout text transform."""
+"""Pure helpers for the item-local post-layout *box* transform.
+
+Glyph-local slant is deliberately rendered from shaped glyph runs and never
+enters the matrix in this module.
+"""
 
 import math
 
@@ -13,8 +17,8 @@ def _text_transform_coefficients(
     vertical_scale: float,
     slant_angle: float,
 ):
-    """Return the canonical scale and sole shear coefficient."""
-    horizontal_scale, vertical_scale, slant_angle = normalize_text_transform(
+    """Return canonical scale and the Box Slant shear coefficient."""
+    horizontal_scale, vertical_scale, slant_angle, _ = normalize_text_transform(
         horizontal_scale, vertical_scale, slant_angle
     )
     return (
@@ -58,12 +62,17 @@ def text_transform_matrix(
     slant_angle: float,
     pivot: QPointF,
 ) -> QTransform:
-    """Build the sole item-local affine matrix used for visual text geometry.
+    """Build the Box-only affine matrix used for visual item geometry.
 
     >>> matrix = text_transform_matrix(2, 3, 0, QPointF(1, 1))
     >>> mapped = matrix.map(QPointF(2, 3))
     >>> (mapped.x(), mapped.y())
     (3.0, 7.0)
+    >>> extreme = text_transform_matrix(4, 4, 85, QPointF())
+    >>> all(math.isfinite(value) for value in (
+    ...     extreme.m11(), extreme.m12(), extreme.m21(), extreme.m22()
+    ... ))
+    True
     """
     horizontal_scale, vertical_scale, shear = _text_transform_coefficients(
         horizontal_scale, vertical_scale, slant_angle

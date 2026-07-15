@@ -16,6 +16,13 @@ from .textedit_commands import SetTextTransformCommand
 from . import shared_widget as SW
 from . import funcmaps as FM
 
+TEXT_TRANSFORM_FIELDS = (
+    'horizontal_scale',
+    'vertical_scale',
+    'slant_angle',
+    'glyph_slant_angle',
+)
+
 
 class LineEdit(QLineEdit):
 
@@ -493,24 +500,31 @@ class FontFormatPanel(Widget):
 
     @staticmethod
     def _transform_with_value(transform, param_name, value):
-        values = dict(zip(
-            ('horizontal_scale', 'vertical_scale', 'slant_angle'), transform
-        ))
+        values = dict(zip(TEXT_TRANSFORM_FIELDS, transform))
         values[param_name] = value
         return normalize_text_transform(
             values['horizontal_scale'],
             values['vertical_scale'],
             values['slant_angle'],
+            values['glyph_slant_angle'],
         )
+
+    def _sync_text_transform_overlays(self):
+        sync = getattr(SW.canvas, 'sync_text_overlays', None)
+        if sync is not None:
+            sync()
+            return
+        # Compatibility for tests/minimal hosts without the overlay manager.
+        control = getattr(SW.canvas, 'txtblkShapeControl', None)
+        if control is not None and control.blk_item in self._transform_items:
+            control.updateBoundingRect()
 
     def _refresh_text_transform_controls(self, refresh_shape=True):
         if self._transform_items:
             self.textadvancedfmt_panel.set_transform_items(self._transform_items)
             if len(self._transform_items) == 1 and C.active_format is not None:
                 transform = self._transform_items[0].blk.fontformat.text_transform
-                for name, value in zip(
-                    ('horizontal_scale', 'vertical_scale', 'slant_angle'), transform
-                ):
+                for name, value in zip(TEXT_TRANSFORM_FIELDS, transform):
                     setattr(C.active_format, name, value)
         else:
             active_format = (
@@ -520,22 +534,15 @@ class FontFormatPanel(Widget):
                 return
             for name, control in self.textadvancedfmt_panel.transform_controls.items():
                 control.set_model_value(getattr(active_format, name))
-        control = getattr(SW.canvas, 'txtblkShapeControl', None)
-        if (
-            refresh_shape
-            and control is not None
-            and control.blk_item in self._transform_items
-        ):
-            control.updateBoundingRect()
+        if refresh_shape:
+            self._sync_text_transform_overlays()
 
     def on_text_transform_commit(self, param_name: str, value: float):
         if not self._transform_items:
             before = self.global_format.text_transform
             after = self._transform_with_value(before, param_name, value)
             if before != after:
-                for name, component in zip(
-                    ('horizontal_scale', 'vertical_scale', 'slant_angle'), after
-                ):
+                for name, component in zip(TEXT_TRANSFORM_FIELDS, after):
                     setattr(self.global_format, name, component)
                 self.update_text_style_label()
             self._refresh_text_transform_controls(refresh_shape=False)
@@ -570,11 +577,7 @@ class FontFormatPanel(Widget):
                     self._transform_drag_before[0],
                     param_name,
                     self._transform_drag_before[0][
-                        (
-                            'horizontal_scale',
-                            'vertical_scale',
-                            'slant_angle',
-                        ).index(param_name)
+                        TEXT_TRANSFORM_FIELDS.index(param_name)
                     ]
                     + canonical_delta,
                 )
@@ -597,9 +600,8 @@ class FontFormatPanel(Widget):
             self._transform_with_value(
                 transform,
                 param_name,
-                transform[
-                    ('horizontal_scale', 'vertical_scale', 'slant_angle').index(param_name)
-                ] + canonical_delta,
+                transform[TEXT_TRANSFORM_FIELDS.index(param_name)]
+                + canonical_delta,
             )
             for transform in self._transform_drag_before
         ]
@@ -614,9 +616,8 @@ class FontFormatPanel(Widget):
                 continue
             if item.set_text_transform(*transform, preview=True):
                 changed_items.append(item)
-        control = getattr(SW.canvas, 'txtblkShapeControl', None)
-        if control is not None and control.blk_item in changed_items:
-            control.updateBoundingRect()
+        if changed_items:
+            self._sync_text_transform_overlays()
 
     def on_text_transform_drag_commit(self, param_name: str, _canonical_delta: float):
         if self._transform_drag_param != param_name or self._transform_drag_before is None:
@@ -628,10 +629,7 @@ class FontFormatPanel(Widget):
             self._transform_drag_after = None
             self._transform_drag_param = None
             if before != after:
-                for name, component in zip(
-                    ('horizontal_scale', 'vertical_scale', 'slant_angle'),
-                    after,
-                ):
+                for name, component in zip(TEXT_TRANSFORM_FIELDS, after):
                     setattr(self.global_format, name, component)
                 self.update_text_style_label()
             self._refresh_text_transform_controls(refresh_shape=False)
@@ -652,9 +650,7 @@ class FontFormatPanel(Widget):
                     item.clear_text_transform_preview() or geometry_changed
                 )
             if geometry_changed:
-                control = getattr(SW.canvas, 'txtblkShapeControl', None)
-                if control is not None and control.blk_item in items:
-                    control.updateBoundingRect()
+                self._sync_text_transform_overlays()
         else:
             SW.canvas.push_undo_command(command)
 
@@ -672,9 +668,7 @@ class FontFormatPanel(Widget):
             self._refresh_text_transform_controls(refresh_shape=False)
             return
         if geometry_changed:
-            control = getattr(SW.canvas, 'txtblkShapeControl', None)
-            if control is not None and control.blk_item in self._transform_items:
-                control.updateBoundingRect()
+            self._sync_text_transform_overlays()
 
     def update_text_style_label(self):
         if self.global_mode():

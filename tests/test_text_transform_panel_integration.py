@@ -49,7 +49,9 @@ class TrackingTextBlkItem(TextBlkItem):
         return super().update(*args, **kwargs)
 
 
-def make_item(horizontal=1.0, vertical=1.0, slant=0.0, idx=0):
+def make_item(
+    horizontal=1.0, vertical=1.0, slant=0.0, glyph_slant=0.0, idx=0
+):
     block = TextBlock(
         xyxy=[10, 20, 110, 70],
         _bounding_rect=[10, 20, 100, 50],
@@ -58,6 +60,7 @@ def make_item(horizontal=1.0, vertical=1.0, slant=0.0, idx=0):
             horizontal_scale=horizontal,
             vertical_scale=vertical,
             slant_angle=slant,
+            glyph_slant_angle=glyph_slant,
         ),
     )
     item = TrackingTextBlkItem(block)
@@ -239,8 +242,10 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
             ('horizontal_scale', 0.1, -10),
             ('vertical_scale', 4.0, 10),
             ('vertical_scale', 0.1, -10),
-            ('slant_angle', 45.0, 10),
-            ('slant_angle', -45.0, -10),
+            ('slant_angle', 85.0, 10),
+            ('slant_angle', -85.0, -10),
+            ('glyph_slant_angle', 45.0, 10),
+            ('glyph_slant_angle', -45.0, -10),
         )
         for param_name, value, display_delta in cases:
             with self.subTest(param_name=param_name, value=value):
@@ -248,6 +253,9 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
                     horizontal=value if param_name == 'horizontal_scale' else 1.0,
                     vertical=value if param_name == 'vertical_scale' else 1.0,
                     slant=value if param_name == 'slant_angle' else 0.0,
+                    glyph_slant=(
+                        value if param_name == 'glyph_slant_angle' else 0.0
+                    ),
                 )
                 self.select_one(item)
                 shape_control = TrackingShapeControl(item)

@@ -227,7 +227,8 @@ class TextTransformAcceptanceMatrixTests(unittest.TestCase):
                     self.assertEqual(item.document().toPlainText(), plain_before)
                     self.assertEqual(item.fontformat.vertical, vertical)
                     self.assertEqual(
-                        item.fontformat.text_transform, (1.55, 0.72, 18.0)
+                        item.fontformat.text_transform,
+                        (1.55, 0.72, 18.0, 0.0),
                     )
 
                     if name == 'partial-rich-formatting':

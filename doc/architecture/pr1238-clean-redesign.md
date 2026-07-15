@@ -1,21 +1,23 @@
 # PR #1238 clean redesign
 
 This document separates observed facts from the design decisions and invariants
-of the clean implementation. It is intentionally based on `upstream/dev`, not
-on code from the rejected feature or its later worklog.
+of the clean implementation. It is intentionally based on the fixed feature
+baseline and `upstream/dev`, not on code from the rejected feature or its later
+worklog.
 
 ## Observed facts
 
 - Repository: `dmMaze/BallonsTranslator`
-- Current `upstream/dev`: `6155f9b303033b24f57a2c025d2edbfed3eb847f`
+- Fixed implementation baseline: `e652479c9872efaf6a30d84bf8124c09ece3e762`
+- Comparison-only `upstream/dev`: `6155f9b303033b24f57a2c025d2edbfed3eb847f`
 - PR #1238 base: `6bff00ee017706eb54637dce828cb0149632ecca`
 - PR #1238 head: `57e9f1c604fc9ccbc79dc9fbf7ad91d77592cf04`
 - Worklog head: `47b47ca37e30ee2a94ab1926e9c454e89a0ecf96`
 - The rejected PR has three feature commits. The later worklog is 39 commits
-  ahead of the current upstream snapshot and changes 23 files by roughly
-  13,800 insertions and 950 deletions.
-- Neither rejected head is an ancestor of this feature branch. The merge base
-  of this branch and `upstream/dev` is the exact upstream SHA above.
+  ahead of the comparison snapshot and changes 23 files by roughly 13,800
+  insertions and 950 deletions.
+- Neither rejected head is an ancestor of this feature branch. The comparison
+  snapshot is an ancestor of the fixed implementation baseline.
 - The original approach mixed visual scale with document point size and font
   stretch. Later repairs added multiple compensating coordinate/state layers,
   per-line transforms, cloned render documents/layouts, and opaque future-state
@@ -28,30 +30,66 @@ patch, file, helper, state object, or cache structure was applied or copied.
 
 ## Design decisions
 
-### Canonical state
+### Canonical state and distinct meanings
 
-`TextBlock.fontformat` is the only persistent owner of:
+`TextBlock.fontformat` is the only persistent owner of the four-component
+`TextTransform`:
 
 ```text
-horizontal_scale = 1.0
-vertical_scale   = 1.0
-slant_angle      = 0.0
+horizontal_scale  = 1.0
+vertical_scale    = 1.0
+slant_angle       = 0.0   # Box Slant
+glyph_slant_angle = 0.0   # Glyph Slant
 ```
 
-The normalized ranges are `[0.1, 4.0]`, `[0.1, 4.0]`, and
-`[-45.0, 45.0]`. Values use six-decimal canonical precision and normalize
-negative zero to zero. The Advanced Text Format boundary alone converts scale
-factors to and from percentages.
+`TextTransform` is a `NamedTuple` in exactly that order. Tuple unpacking and
+tuple equality therefore remain supported while field names make omissions
+visible. `FontFormat.text_transform` returns this type, and
+`normalize_text_transform()` accepts the same four values. Its fourth argument
+defaults to `0.0` only for source compatibility with existing three-argument
+callers; production UI, command, persistence, and translation paths explicitly
+carry all four values.
 
-The rich-text document remains the owner of logical text and native character
-formatting, including native italic shaping. No transform factor changes point
-size, character stretch, HTML, wrapping, or line breaks.
+The canonical ranges are:
 
-### Geometry
+| Component | Inclusive range | Meaning |
+| --- | --- | --- |
+| Horizontal Scale | `[0.1, 4.0]` | Post-layout box x scale |
+| Vertical Scale | `[0.1, 4.0]` | Post-layout box y scale |
+| Box Slant (`slant_angle`) | `[-85.0, 85.0]` | Whole-item shear |
+| Glyph Slant (`glyph_slant_angle`) | `[-45.0, 45.0]` | Glyph ink-only shear |
 
-There is one post-layout base transform on `TextBlkItem`. Its pivot is the
-center of the unpadded logical block rectangle. For a local point `(x, y)` and
-pivot `(px, py)`:
+Values use six-decimal canonical precision and normalize negative zero to zero.
+Booleans, nonnumbers, NaN, and infinity are rejected. Runtime/API values are
+clamped; typed UI values outside the range are rejected and restored instead.
+The compatibility constants `TEXT_TRANSFORM_SLANT_MIN/MAX` remain aliases for
+the Box Slant range. The explicit Box and Glyph Slant constants are authoritative.
+
+These meanings are intentionally independent:
+
+- `FontFormat.italic` remains native font italic shaping.
+- `glyph_slant_angle` changes shaped glyph ink without changing layout.
+- `slant_angle` remains the existing whole-`TextBlkItem` Box Shear.
+- `TextBlock.angle` remains the existing block rotation.
+
+Native italic and Glyph Slant are cumulative; neither suppresses the other.
+The rich-text document continues to own logical text and native character
+formatting. No transform factor changes point size, font stretch, HTML,
+wrapping, line advances, or line breaks.
+
+### Transform composition and direction
+
+The composition order is fixed:
+
+1. native font shaping, native italic, fallback, ligatures, and combining marks;
+2. glyph-local `glyph_slant_angle`;
+3. the existing vertical glyph orientation;
+4. Horizontal/Vertical Scale and `slant_angle` Box Shear;
+5. `TextBlock.angle` block rotation.
+
+The Box transform remains one post-layout `QTransform` on `TextBlkItem`, with
+the center of `logical_unpadded_rect()` as its pivot. For local point `(x, y)`
+and pivot `(px, py)`:
 
 ```text
 k  = -tan(radians(slant_angle))
@@ -59,87 +97,294 @@ x' = px + horizontal_scale * (x - px) + k * vertical_scale * (y - py)
 y' = py + vertical_scale * (y - py)
 ```
 
-The single `QTransform` is applied with `combine=False`. Existing block
-rotation remains `QGraphicsItem` rotation about the same pivot and is therefore
-applied after the base transform. Horizontal and vertical layouts use the same
-matrix; changing writing direction never swaps scale axes.
+`text_transform_matrix()` continues to accept only these three Box values and
+is applied with `combine=False`. Existing item rotation follows about the same
+pivot. Horizontal and vertical writing use the same box axes; changing writing
+direction never swaps the scale factors. The ±85° limit remains finite and
+invertible for all canonical scale values, while ±90° is never canonical.
 
-Logical persistence/layout callers continue to use the untransformed rectangle.
-Visual callers use the four mapped corners. The shape control maps those exact
-corners from scene space into its parent, so shear is never collapsed to an
-axis-aligned substitute. Resize maps the pointer through `item.mapFromScene()`
-and compensates item position to keep the opposite scene anchor fixed.
-
-### Rendering and editing
-
-All passes use the live document and its attached layout. The intended order is
-shadow, stroke, normal fill/gradient, then Qt's selection/cursor/IME overlay.
-Effects are measured in logical object space and inherit the item transform.
-Effect padding is recomputed from zero so removing an effect can shrink it.
-
-Mouse hit testing remains local-layout hit testing. Qt item/scene mapping is the
-only inverse boundary for transformed cursor and IME geometry. A transform-only
-preview or commit does not mutate the document, cursor position/anchor, logical
-rectangle, item position, or layout. Direction changes replace only the layout
-and restore the exact cursor position and anchor without writing corrective
-spacing into rich text.
-
-### UI and undo
-
-Each transform control has three states: idle, pending text, and drag preview.
-Typing changes no model. Enter, focus loss, and selection transition commit once;
-Escape reverts. Drag move changes only transient item transforms, and release
-creates one command. Mixed drag applies the same display-unit delta to each
-item's own starting value; mixed numeric input applies one absolute value.
-
-One undo command owns all selected items plus per-item before/after canonical
-tuples. A normalized no-op creates no command and triggers no item update. The
-command stores no HTML, pixmap, scene snapshot, panel state, or derived matrix.
-
-### Persistence
-
-The canonical project root schema is version 1. Each block writes the three
-canonical fields inside `fontformat`. Loading is transactional:
+Glyph Slant uses each live `QTextLine` logical baseline as its pivot:
 
 ```text
-preflight raw versions
--> migrate a deep copy
--> construct and validate an isolated candidate project
--> replace live project state
+x' = x - tan(radians(glyph_slant_angle)) * (y - baseline_y)
+y' = y
 ```
 
-| Input | Result |
-| --- | --- |
-| Upstream project with no transform fields | Neutral defaults; HTML unchanged |
-| Canonical schema 1 | Validate/normalize; HTML unchanged |
-| Known failed logical representation | Canonicalize known aliases; HTML unchanged |
-| Neutral unversioned failed representation | Canonicalize; HTML unchanged |
-| Exact reversible effective representation | Restore logical font geometry; record warning |
-| Ambiguous effective representation | Reject the whole project |
-| Future root or block representation | Reject before live-state mutation |
-| Nonnumeric or non-finite value | Reject |
-| Finite out-of-range value | Clamp and record a migration warning |
+Qt screen y increases downward, so a positive angle leans the glyph top toward
+glyph-local `+x`. That is page-right for horizontal and upright vertical glyphs.
+For Latin, digits, and punctuation that the existing vertical layout rotates,
+the glyph-local shear is applied first and the existing 90° orientation second;
+glyph-local `+x` then maps page-down. The existing punctuation orientation sets
+remain authoritative.
 
-Canonical output removes legacy aliases and markers. A second load/save performs
-no migration. Duplication continues to use the existing deep-copy contract.
+### Glyph rendering and logical interaction
+
+`glyph_slant_angle == 0.0` is an exact legacy fast path. Horizontal layout uses
+the existing `QTextLayout.draw()`, and vertical layout and vertical effect masks
+use their existing per-character paths and punctuation rotation. The custom
+renderer is not entered at zero, preserving pixels, document state, layout
+geometry, native italic, gradients, caches, and undo behavior.
+
+Only a nonzero Glyph Slant enters `text_glyph_renderer.py`. It consumes glyph
+runs from the attached live `QTextLayout`; it never clones or mutates a document
+or layout. Paint spans are split at UTF-16 boundaries. Document fragment format
+is the base, `QTextLayout.formats()` ranges merge in order, and paint-context
+selection format merges last. Qt's glyph-run ordering and raw-font division are
+preserved for fallback fonts, ligatures, combining marks, and bidirectional text.
+
+`QRawFont.pathForGlyph()` supplies vector ink. The renderer combines glyph-run
+position, line offset, glyph shear, and the orientation supplied by
+`SceneTextLayout`. Empty/pathless paths use `QPainter.drawGlyphRun()` under the
+same local transform, and `QRawFont.boundingRect()` supplies their bounds. One
+resulting silhouette is reused by fill, `QTextCharFormat.textOutline`, app
+stroke, vertical masks, and shadow masks. The gradient field remains anchored
+to the item-local logical box; only the glyph geometry moves through it.
+
+Every pass uses the live document and attached layout. Composition order is
+shadow, app stroke, normal fill/gradient (with document text outline before its
+fill), then the logical selection/cursor/IME overlay. Effects are measured in
+item-local object space and inherit the later Box transform and block rotation.
+
+Backgrounds, selection cells, underline, overline, strikeout, caret, IME
+microfocus, and hit testing remain logical geometry and receive no glyph-local
+shear. Selection foreground is a second draw of the same slanted glyph geometry
+clipped to the logical selection rectangle, so a ligature's overhang outside
+the selected cell keeps its normal foreground. Preedit glyph ink is slanted
+because it is part of the live layout, while its decoration and microfocus stay
+logical.
+
+### Logical geometry and paint overflow
+
+Logical persistence and layout always use the untransformed, unpadded block
+rectangle. `TextBlkItem.shape()`, hit tests, saved rectangles, selection
+polygons, and resize anchors use `logical_unpadded_rect()`, not effect padding
+or Glyph Slant overhang. Visual callers map the four exact logical corners;
+shear is never replaced by an axis-aligned approximation. Resize maps the
+pointer through `item.mapFromScene()` and compensates position so the opposite
+scene anchor remains fixed.
+
+Nonzero Glyph Slant bounds are calculated from the same live glyph runs,
+orientation, and shear used to paint. `SceneTextLayout.glyphInkBounds()` caches
+the vector envelope by document revision, layout generation, writing-layout
+type, and effective glyph angle. Relayout and angle changes invalidate it.
+Empty documents return an empty envelope; whitespace retains logical advance
+without manufacturing ink.
+
+`TextBlkItem` expands effect padding to include glyph overhang, stroke outset,
+shadow offset/blur, antialiasing, and a transparent-border guard. Padding rounds
+outward to the existing 1/64 layout-unit grid. It may change `boundingRect()`
+only after `prepareGeometryChange()`; it never changes the absolute logical
+rectangle or transform pivot. Zero Glyph Slant with no stroke or shadow keeps
+the existing zero-padding path. The legacy scratch-image measurement remains
+only on the zero-angle effects path; nonzero Glyph Slant uses vector bounds.
+
+### Effect cache and bounded raster resources
+
+`TextBlkItem.refresh_cache_policy()` is the sole owner of
+`QGraphicsItem.setCacheMode()` for live text items:
+
+- editing, a nonidentity Box transform, or nonzero block rotation uses `NoCache`;
+- otherwise it uses `DeviceCoordinateCache`;
+- Glyph Slant alone does not forbid `DeviceCoordinateCache`, but changing it
+  explicitly invalidates item and effect caches.
+
+Box preview changes only the item matrix and does not rebuild local effect
+rasters. Glyph preview updates the attached layout angle, marks the effect
+generation dirty, and schedules paint. Several preview events can therefore
+coalesce into one rebuild. A raster from an older generation is never composed
+with new glyph fill.
+
+`plan_effect_raster()` bounds every full effect surface using:
+
+```text
+EFFECT_CACHE_MAX_SCALE     = 8.0
+EFFECT_CACHE_MAX_PIXELS    = 4,194,304
+EFFECT_CACHE_MAX_DIMENSION = 8192
+EFFECT_CACHE_MAX_BYTES     = 32 MiB per item
+EFFECT_TILE_MAX_EDGE       = 2048 device pixels
+```
+
+The requested scale is the painter transform's maximum singular value, capped
+at 8. The planner tests power-of-two tiers `{8, 4, 2, 1}` from the greatest tier
+not exceeding the request and chooses the largest tier satisfying dimension,
+pixel, and byte caps. It measures the local effect rectangle, never the
+Box-sheared scene extent. If tier 1 cannot fit, effects enter tile mode.
+
+Tile mode renders only tiles intersecting the painter's exposed/clip logical
+rectangle. Tiles include stroke, shadow, blur/offset, and antialiasing overlap;
+fill and stroke remain vector geometry. Oversized shadow context alone may be
+downsampled and smoothly scaled back. At most two currently visible tile
+surfaces are retained, and tiles outside the current exposure are discarded.
+Ordinary surfaces that fit retain the single `background_pixmap` fast path.
+
+An in-cap allocation failure first retries tier 1. Interactive paint then drops
+the failed cache, continues fill and vector stroke, omits shadow for that frame,
+keeps the cache dirty for a later retry, and logs once per item/generation
+without mutating the model. During
+`Canvas.render_result_img()`, `set_export_effect_render(True)` makes a failed
+tier-1/tile retry raise `EffectRasterAllocationError`; no partial export is
+returned, and the render transaction restores its captured render state in
+`finally`.
+
+### Responsive controls, preview, and undo
+
+Advanced Text Format presents Horizontal Scale, Vertical Scale, Box Slant, and
+Glyph Slant as four independent atomic controls. Its local
+`AdaptiveWrapLayout` preserves control order and widget identity, greedily wraps
+whole label/editor units, supports child height-for-width, and excludes hidden
+items. Horizontal scrolling remains disabled; preferred height is derived from
+the current viewport width and capped, with vertical scrolling only as needed.
+Relayout does not commit or cancel pending text or drag preview and does not
+rebuild or reparent controls.
+
+Each transform control retains idle, pending-text, and drag-preview states.
+Typing changes no model until commit; invalid typed input restores the last
+canonical display. Drag preview is transient item state. Mixed drag applies a
+display-unit delta to each item's own starting value; mixed typed input applies
+one absolute value. Escape restores the canonical quartet without an undo step.
+
+`SetTextTransformCommand` owns all selected items and per-item before/after
+`TextTransform` values. Redo and undo apply the quartet atomically and request
+one overlay synchronization. A normalized no-op writes no model field, creates
+no command, rebuilds no cache, and requests no unnecessary repaint. Commands do
+not store HTML, pixmaps, scene snapshots, panel state, or derived matrices.
+
+### Overlay ownership, invalidation, and export exclusion
+
+Selection and text-block guides are UI overlays, not `TextBlkItem` paint.
+`TextOverlayManager` owns reusable `TextGuideOverlayItem` instances under the
+existing `baseLayer`, while `TextBlkShapeControl` owns the active outline and
+handles. Every overlay carries `UI_OVERLAY_ITEM_DATA_KEY = 0x1238`, uses
+`NoCache`, accepts no text-item paint ownership, and uses idempotent
+`SourceOver` composition. The reusable guide is blue solid at 3 device pixels
+for unselected text-block mode and pink dashed at 3.5 device pixels for selected
+nonactive items. The active item is drawn once by the shape control.
+
+Overlay bounds contain the cosmetic pen half-width plus a two-device-pixel
+guard. Handles contribute their own device-space footprints, including
+`ItemIgnoresTransformations` handles. For every `QGraphicsView` attached to the
+scene, `OverlayFootprintInvalidator` records the old device region, updates
+polygon/shape/handle geometry, records the new region, and calls
+`viewport().update(old | new)`. `TextOverlayManager.sync_overlays()` is the one
+entry point used by move preview/drop/cancel, undo/redo, keyboard movement,
+transform changes, reshape, rotation, selection, item lifecycle, zoom, viewport
+resize, and text-block-mode changes. Normal movement never requires
+`FullViewportUpdate` or a full viewport repaint.
+
+Movement state uses logical coordinates. `TextBlkItem.logical_position()` and
+`set_logical_position()` address the absolute unpadded top-left independently of
+paint padding. Mouse move snapshots selected logical positions; drop creates
+one `MoveBlkItemsCommand` only for a real delta. Escape restores the snapshot,
+move baselines, and old/new overlay regions without creating a command.
+Keyboard move commands follow the same logical-position and overlay callback
+contract.
+
+At ±85° a true handle may be far outside the viewport. Shape controls keep true
+scene geometry unchanged but clamp only the displayed proxy handle to a
+12-device-pixel viewport inset. Proxy drag converts device-pointer delta through
+the inverse view transform and applies it to the true scene point, avoiding a
+jump at drag start.
+
+`Canvas.render_result_img()` is the authoritative export exclusion boundary.
+It snapshots and hides every item carrying `UI_OVERLAY_ITEM_DATA_KEY`, enables
+fatal effect-render allocation semantics, renders, then restores overlay
+visibility, painter state, scene scale, scroll positions, and layer
+visibility/opacity in `finally`. Guides and handles can therefore enter neither
+scene output nor saved/exported images, even when rendering raises.
+
+### Persistence and migration
+
+The canonical project root schema is version 2. Every schema-v2 block requires
+a `fontformat` object containing all four canonical keys:
+
+```text
+horizontal_scale
+vertical_scale
+slant_angle
+glyph_slant_angle
+```
+
+Schema-v2 loading is strict. Missing fields, booleans, nonnumbers, nonfinite
+values, or out-of-range values reject the complete payload rather than clamp.
+Top-level transform aliases, any `italic_angle`, any top-level
+`glyph_slant_angle`, or any `rich_text_transform_version` marker also make a v2
+payload noncanonical and reject it. Canonical output contains none of those
+aliases or markers.
+
+Root versions absent/0/1 migrate on a deep copy:
+
+- canonical H/V/Box fields and supported top-level H/V aliases keep their
+  established meanings;
+- legacy `italic_angle` maps only to Box Slant and emits one deduplicated
+  project warning;
+- Glyph Slant is added as neutral `0.0` without a warning;
+- any Glyph Slant field already present in v0/v1 is treated as a partially
+  written future payload and rejects the project;
+- finite legacy out-of-range values clamp to current ranges with warnings;
+- conflicting aliases and ambiguous effective rich-text representations reject;
+- failed stretch-HTML reversal remains exact and transactional;
+- legacy block markers 0 and 1 retain their existing meanings, while marker 2
+  or later remains unsupported.
+
+Future root version 3 or later rejects before live-state mutation. Migration
+preflights all raw versions and blocks, constructs and validates a complete
+candidate project, and adopts it only after success. A failed load therefore
+cannot partially replace the open project. A canonical second load/save is
+idempotent. Existing generic `FontFormat` config/style/deep-copy serialization
+adds neutral Glyph Slant for old presets and preserves all four values for new
+presets and copy/paste; no `italic_angle` style alias is introduced.
+
+### Translation pipeline
+
+`_apply_global_text_transforms(block, global_format)` copies the normalized
+global quartet as one update. It deliberately supplements rather than replaces
+the existing font/effect/writing-mode allow-list.
+
+For a normal non-inpaint-only run, existing style override logic runs first and
+the helper then applies all four global values to every result block, including
+a horizontal scale of exactly `1.0` and blocks newly produced by detection.
+Transform application does not depend on the other style override flags.
+
+For **Run without update textstyle**, the run snapshots each existing block's
+complete `FontFormat` and block identity before detection can replace blocks.
+If both block identities and count still match for a page, each full backup
+format is restored and the global quartet helper is not called. If the backup
+is absent, count differs, or identity differs, the pipeline performs no
+index-based guess: it falls back to normal global-format semantics and logs one
+warning for that page. Warning deduplication resets at run start.
+
+Inpaint-only remains style-neutral. Selected-block translation commands preserve
+the existing block's complete `FontFormat`; manual new blocks and Apply Global
+Format continue to use the complete global format; copy/paste keeps the deep
+copy; and detection identity, auto-layout, and squeeze behavior are unchanged.
 
 ## Required invariants
 
-- The feature branch starts at the exact upstream SHA recorded above.
-- Transform state has one persistent owner and one item-local affine matrix.
-- Visual transforms never enter logical HTML, font geometry, wrapping, masks,
-  or persisted block rectangles.
-- Preview never mutates canonical state; commit never derives state from a
-  matrix.
-- Direction, edit mode, canvas rendering, and scene export share geometry and
-  rendering paths.
-- Stroke, shadow, and gradient use the current document/layout and cannot create
-  alternate transform formulas.
-- Transform-only undo is atomic across the selection and preserves HTML,
-  document revision, logical geometry, and cursor selection.
-- Unsupported or ambiguous payloads cannot partially replace an open project.
-- No-op operations leave undo count, repaint notifications, document/layout
-  generations, and item matrices unchanged.
+- The implementation starts at the fixed baseline recorded above; rejected
+  feature branches remain requirements evidence only.
+- Persistent transform state has one owner and exactly four named components.
+- Native italic, Glyph Slant, Box Slant, and block rotation retain separate
+  meanings and the specified composition order.
+- Glyph Slant never changes logical HTML, font geometry, wrapping, advances,
+  hit testing, caret geometry, or persisted rectangles.
+- The zero-degree Glyph Slant path is the pre-feature paint path, not a custom
+  approximation.
+- Preview never mutates canonical state; commit never derives canonical values
+  from a matrix.
+- Direction, editing, scene rendering, effects, and export share live layout
+  and glyph geometry; no renderer clones a document or invents another shear.
+- Effect allocation observes scale, dimension, pixel, byte, tile-count, and
+  visibility caps; export fails atomically if its bounded retries cannot render.
+- UI guides are uncached overlays with per-view old/new device invalidation and
+  are excluded transactionally from export.
+- Transform-only and movement undo are selection-atomic, use logical values,
+  preserve HTML/document state, and synchronize overlays once.
+- Schema-v2 violations, future versions, and ambiguous legacy payloads reject
+  transactionally; old Box values are never reinterpreted as Glyph Slant.
+- Normal translation applies the global quartet; exact preserve-style matches
+  restore the full backup format; ambiguous matches use warned normal fallback.
+- No-op operations leave undo count, repaint notifications, layout/effect
+  generations, item matrices, and canonical model values unchanged.
 
 Verification commands, baseline results, manual artifacts, and the independent
 review report are stored with the implementation artifacts rather than asserted

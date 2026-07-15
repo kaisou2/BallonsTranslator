@@ -19,6 +19,7 @@ from ballontranslator.utils.message import create_error_dialog, create_info_dial
 from ballontranslator.modules import GET_VALID_TEXTDETECTORS, GET_VALID_INPAINTERS, GET_VALID_TRANSLATORS, GET_VALID_OCR
 from .misc import parse_stylesheet, set_html_family, QKEY
 from ballontranslator.utils.config import ProgramConfig, pcfg, save_config, text_styles, save_text_styles, load_textstyle_from, FontFormat
+from ballontranslator.utils.fontformat import normalize_text_transform
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans
 from .canvas import Canvas
 from .configpanel import ConfigPanel
@@ -60,6 +61,38 @@ class PageListView(QListWidget):
         return super().contextMenuEvent(e)
 
 mainwindow_cls = Widget if shared.HEADLESS else FramelessWindow
+
+
+def _apply_global_text_transforms(block: TextBlock, global_format: FontFormat) -> bool:
+    """Copy the normalized global transform quartet as one model update.
+
+    The translation pipeline intentionally keeps its existing style allow-list;
+    only these four post-layout values are unconditional in a normal run.
+
+    >>> block = TextBlock(fontformat=FontFormat(horizontal_scale=.8))
+    >>> global_format = FontFormat(vertical_scale=1.2, slant_angle=20, glyph_slant_angle=12)
+    >>> _apply_global_text_transforms(block, global_format)
+    True
+    >>> block.fontformat.text_transform == (1.0, 1.2, 20.0, 12.0)
+    True
+    """
+    target = normalize_text_transform(
+        global_format.horizontal_scale,
+        global_format.vertical_scale,
+        global_format.slant_angle,
+        global_format.glyph_slant_angle,
+    )
+    if block.fontformat.text_transform == target:
+        return False
+    (
+        block.fontformat.horizontal_scale,
+        block.fontformat.vertical_scale,
+        block.fontformat.slant_angle,
+        block.fontformat.glyph_slant_angle,
+    ) = target
+    return True
+
+
 class MainWindow(mainwindow_cls):
 
     imgtrans_proj: ProjImgTrans = ProjImgTrans()
@@ -99,7 +132,9 @@ class MainWindow(mainwindow_cls):
         shared.register_view_widget = self.register_view_widget
 
         self.backup_blkstyles = []
+        self._backup_blkstyle_block_ids = []
         self._run_imgtrans_wo_textstyle_update = False
+        self._textstyle_preserve_warning_pages = set()
 
         self.setupThread()
         self.setupUi()
@@ -1255,7 +1290,6 @@ class MainWindow(mainwindow_cls):
 
     def setTextBlockMode(self):
         mode = self.bottomBar.textblockChecker.isChecked()
-        self.canvas.setTextBlockMode(mode)
         pcfg.imgtrans_textblock = mode
         self.st_manager.showTextblkItemRect(mode)
 
@@ -1505,6 +1539,7 @@ class MainWindow(mainwindow_cls):
 
     def on_imgtrans_pipeline_finished(self):
         self.backup_blkstyles.clear()
+        self._backup_blkstyle_block_ids.clear()
         self._run_imgtrans_wo_textstyle_update = False
         self.postprocess_mt_toggle = True
         if pcfg.module.empty_runcache and not shared.HEADLESS:
@@ -1538,13 +1573,54 @@ class MainWindow(mainwindow_cls):
             if pcfg.let_uppercase_flag:
                 blk.translation = blk.translation.upper()
 
+    def _matching_backup_fontformats(
+        self,
+        page_index: int,
+        blk_list: List[TextBlock],
+    ):
+        if page_index < 0 or page_index >= len(self.backup_blkstyles):
+            return None
+        fontformats = self.backup_blkstyles[page_index]
+        if fontformats is None or len(fontformats) != len(blk_list):
+            return None
+
+        identity_pages = getattr(self, '_backup_blkstyle_block_ids', ())
+        if page_index < len(identity_pages):
+            expected_ids = identity_pages[page_index]
+            if expected_ids is not None and expected_ids != tuple(map(id, blk_list)):
+                return None
+        return fontformats
+
+    def _warn_textstyle_preserve_fallback(self, page_index: int) -> None:
+        warned_pages = getattr(self, '_textstyle_preserve_warning_pages', None)
+        if warned_pages is None:
+            warned_pages = self._textstyle_preserve_warning_pages = set()
+        if page_index in warned_pages:
+            return
+        warned_pages.add(page_index)
+        try:
+            page_name = self.imgtrans_proj.idx2pagename(page_index)
+        except Exception:
+            page_name = str(page_index)
+        LOGGER.warning(
+            f'Could not preserve text style for {page_name}: the saved block '
+            'formats no longer match; using normal global-format semantics.'
+        )
+
     def on_pagtrans_finished(self, page_index: int):
         blk_list = self.imgtrans_proj.get_blklist_byidx(page_index)
-        ffmt_list = None
-        if len(self.backup_blkstyles) == self.imgtrans_proj.num_pages and len(self.backup_blkstyles[page_index]) == len(blk_list):
-            ffmt_list: List[FontFormat] = self.backup_blkstyles[page_index]
+        ffmt_list = self._matching_backup_fontformats(page_index, blk_list)
 
-        self.postprocess_translations(blk_list)
+        inpaint_only = pcfg.module.enable_inpaint
+        inpaint_only = inpaint_only and not (
+            pcfg.module.enable_detect
+            or pcfg.module.enable_ocr
+            or pcfg.module.enable_translate
+        )
+        # Inpaint-only must not run translation postprocessing because that
+        # path can change writing mode and alignment for non-CJK targets.
+        if not inpaint_only:
+            self.postprocess_translations(blk_list)
                 
         # override font format if necessary
         override_fnt_size = pcfg.let_fntsize_flag == 1
@@ -1556,13 +1632,16 @@ class MainWindow(mainwindow_cls):
         override_writing_mode = pcfg.let_writing_mode_flag == 1
         override_font_family = pcfg.let_family_flag == 1
         gf = self.textPanel.formatpanel.global_format
-
-        inpaint_only = pcfg.module.enable_inpaint
-        inpaint_only = inpaint_only and not (pcfg.module.enable_detect or pcfg.module.enable_ocr or pcfg.module.enable_translate)
         
         if not inpaint_only:
+            preserve_styles = (
+                self._run_imgtrans_wo_textstyle_update
+                and ffmt_list is not None
+            )
+            if self._run_imgtrans_wo_textstyle_update and not preserve_styles:
+                self._warn_textstyle_preserve_fallback(page_index)
             for ii, blk in enumerate(blk_list):
-                if self._run_imgtrans_wo_textstyle_update and ffmt_list is not None:
+                if preserve_styles:
                     blk.fontformat.merge(ffmt_list[ii])
                 else:
                     if override_fnt_size or \
@@ -1603,6 +1682,7 @@ class MainWindow(mainwindow_cls):
                     sw = blk.stroke_width
                     if sw > 0 and pcfg.module.enable_ocr and pcfg.module.enable_detect and not override_fnt_size:
                         blk.font_size = blk.font_size / (1 + sw)
+                    _apply_global_text_transforms(blk, gf)
 
             self.st_manager.auto_textlayout_flag = pcfg.let_autolayout_flag and \
                 (pcfg.module.enable_detect or pcfg.module.enable_translate)
@@ -1710,6 +1790,8 @@ class MainWindow(mainwindow_cls):
 
     def on_run_imgtrans(self, continue_mode=False):
         self.backup_blkstyles.clear()
+        self._backup_blkstyle_block_ids.clear()
+        self._textstyle_preserve_warning_pages.clear()
 
         if self.bottomBar.textblockChecker.isChecked():
             self.bottomBar.textblockChecker.click()
@@ -1729,6 +1811,28 @@ class MainWindow(mainwindow_cls):
         else:
             for page_name in self.imgtrans_proj.pages:
                 self.imgtrans_proj.set_page_progress(page_name, 0)
+
+        if not pcfg.module.enable_detect:
+            self.st_manager.updateTextBlkList()
+
+        # Snapshot before detection can replace or clear blocks. Matching
+        # object identities and counts later prevents index-based style guesses.
+        if self._run_imgtrans_wo_textstyle_update:
+            self.backup_blkstyles.extend([None] * self.imgtrans_proj.num_pages)
+            self._backup_blkstyle_block_ids.extend(
+                [None] * self.imgtrans_proj.num_pages
+            )
+            for page_index, (page_name, blklist) in enumerate(
+                self.imgtrans_proj.pages.items()
+            ):
+                if pages_to_process and page_name not in pages_to_process:
+                    continue
+                self.backup_blkstyles[page_index] = [
+                    textblock.fontformat.deepcopy() for textblock in blklist
+                ]
+                self._backup_blkstyle_block_ids[page_index] = tuple(
+                    map(id, blklist)
+                )
         
         if pcfg.module.enable_detect:
             for page in self.imgtrans_proj.pages:
@@ -1737,18 +1841,12 @@ class MainWindow(mainwindow_cls):
                         # 没有指定pages_to_process，清空所有页面
                         self.imgtrans_proj.pages[page].clear()
         else:
-            self.st_manager.updateTextBlkList()
             textblk: TextBlock = None
             for page_name, blklist in self.imgtrans_proj.pages.items():
                 # 如果指定了pages_to_process，跳过不需要处理的页面
                 if pages_to_process and page_name not in pages_to_process:
                     continue
-                    
-                ffmt_list = []
-                self.backup_blkstyles.append(ffmt_list)
                 for textblk in blklist:
-                    if not pcfg.module.enable_detect:
-                        ffmt_list.append(textblk.fontformat.deepcopy())
                     # 继续模式且没有指定pages_to_process时：跳过已有文本的文本块
                     if continue_mode and not pages_to_process and textblk.text and len(textblk.text) > 0:
                         continue
