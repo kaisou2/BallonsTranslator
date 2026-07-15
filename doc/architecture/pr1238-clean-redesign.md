@@ -98,10 +98,25 @@ y' = py + vertical_scale * (y - py)
 ```
 
 `text_transform_matrix()` continues to accept only these three Box values and
-is applied with `combine=False`. Existing item rotation follows about the same
-pivot. Horizontal and vertical writing use the same box axes; changing writing
-direction never swaps the scale factors. The ±85° limit remains finite and
-invertible for all canonical scale values, while ±90° is never canonical.
+returns the canonical Box matrix `S`. Qt's fixed `QGraphicsItem` composition
+would apply built-in rotation `R` before a raw base `S`, so the installed base
+matrix is the derived compensation `C = R^-1 * S * R`. Qt then composes
+`R * C == S * R`, which maps points as Box first and rotation last. `C` is
+rebuilt from canonical values, the current angle, and the current pivots; it is
+never accumulated or persisted. Rotation and transform-origin Qt property
+writes are finalized through `ItemSendsGeometryChanges` notifications so direct
+setters, meta-property writes, and property animation share the same path. The
+item-level `transformations()` list must remain empty. Nonfinite rotation or
+origin writes are rejected in the pre-change notification so validation never
+escapes through Qt's C++ virtual-call boundary; a nonfinite persisted block
+angle is repaired to zero while loading.
+
+The normal Box pivot and rotation origin are both the center of
+`logical_unpadded_rect()`. The derived helper keeps them explicit so a Qt origin
+property write remains mathematically defined. Horizontal and vertical writing
+use the same box axes; changing writing direction never swaps the scale factors.
+The ±85° limit remains finite and invertible for all canonical scale values,
+while ±90° is never canonical.
 
 Glyph Slant uses each live `QTextLine` logical baseline as its pivot:
 
@@ -163,6 +178,17 @@ shear is never replaced by an axis-aligned approximation. Resize maps the
 pointer through `item.mapFromScene()` and compensates position so the opposite
 scene anchor remains fixed.
 
+Automatic document resizing preserves its semantic anchor directly in parent
+coordinates: horizontal Left uses top-left, Center uses center, and Right or
+vertical writing uses top-right. A synchronous layout resize is one geometry
+transaction: `prepareGeometryChange()` precedes relayout, layout signals are
+held until the final expanded document size, display rect, pivot, compensated
+matrix, anchor position, and model rectangle agree, then one final
+`documentSizeChanged` notification is emitted. A resize requested reentrantly
+from that notification is deferred until delivery completes. If synchronous
+relayout mutates its size and then raises, the same final-state reconciliation
+and notification happen before the original error is propagated.
+
 Nonzero Glyph Slant bounds are calculated from the same live glyph runs,
 orientation, and shear used to paint. `SceneTextLayout.glyphInkBounds()` caches
 the vector envelope by document revision, layout generation, writing-layout
@@ -183,7 +209,8 @@ only on the zero-angle effects path; nonzero Glyph Slant uses vector bounds.
 `TextBlkItem.refresh_cache_policy()` is the sole owner of
 `QGraphicsItem.setCacheMode()` for live text items:
 
-- editing, a nonidentity Box transform, or nonzero block rotation uses `NoCache`;
+- editing, a nonidentity Box transform, nonzero block rotation, or nonidentity
+  built-in item scale uses `NoCache`;
 - otherwise it uses `DeviceCoordinateCache`;
 - Glyph Slant alone does not forbid `DeviceCoordinateCache`, but changing it
   explicitly invalidates item and effect caches.

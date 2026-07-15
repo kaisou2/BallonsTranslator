@@ -1,4 +1,5 @@
 import math, re
+from contextlib import contextmanager
 import cv2
 import numpy as np
 from typing import List, NamedTuple, Optional, Union, Tuple
@@ -27,7 +28,7 @@ from .text_glyph_renderer import (
     GlyphRasterAllocationError,
 )
 from .text_graphical_effect import apply_shadow_effect
-from .text_transform import rect_polygon, text_transform_matrix
+from .text_transform import compensated_text_transform_matrix, rect_polygon
 
 TEXTRECT_SHOW_COLOR = QColor(30, 147, 229, 170)
 TEXTRECT_SELECTED_COLOR = QColor(248, 64, 147, 170)
@@ -137,6 +138,11 @@ class TextBlkItem(QGraphicsTextItem):
 
     def __init__(self, blk: TextBlock = None, idx: int = 0, set_format=True, show_rect=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._installing_text_transform = False
+        self._text_transform_update_depth = 1
+        self._text_transform_update_dirty = False
+        self._size_transaction_active = False
+        self._pending_size_request = None
         self.pre_editing = False
         self.blk: TextBlock = None
         self.fontformat: FontFormat = None
@@ -180,11 +186,22 @@ class TextBlkItem(QGraphicsTextItem):
         self.block_change_signal = False
 
         self.layout: Union[VerticalTextDocumentLayout, HorizontalTextDocumentLayout] = None
+        # Qt meta-properties can bypass Python setter overrides. Geometry
+        # notifications keep rotation and origin changes on one code path.
+        self.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True
+        )
         self.document().setDocumentMargin(0)
         self.initTextBlock(blk, set_format=set_format)
         self.setBoundingRegionGranularity(0)
-        self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable)
-        self.refresh_cache_policy()
+        self.setFlags(
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+            | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+            | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
+        )
+        self._request_text_transform_update()
+        self._text_transform_update_depth = 0
+        self._flush_text_transform_update()
 
     def inputMethodEvent(self, e: QInputMethodEvent):
         if self.pre_editing == False:
@@ -897,8 +914,20 @@ class TextBlkItem(QGraphicsTextItem):
         self.setVertical(blk.vertical)
         self.setRect(blk.bounding_rect(), update_blk_rect=False)
         
-        if blk.angle != 0:
-            self.setRotation(blk.angle)
+        try:
+            block_angle = self._validated_rotation_angle(blk.angle)
+        except ValueError as error:
+            try:
+                LOGGER.warning(
+                    f'Reset invalid TextBlock rotation to 0 during load: '
+                    f'{error}'
+                )
+            except Exception:
+                pass
+            block_angle = 0.0
+        blk.angle = block_angle
+        if block_angle != 0:
+            self.setRotation(block_angle)
         
         set_char_fmt = False
         if blk.translation:
@@ -936,12 +965,203 @@ class TextBlkItem(QGraphicsTextItem):
             return self._text_transform_preview
         return self._canonical_text_transform()
 
+    @contextmanager
+    def _text_transform_update(self):
+        """Batch cache and input-method work across nested Qt changes."""
+        self._text_transform_update_depth += 1
+        try:
+            yield
+        finally:
+            self._text_transform_update_depth -= 1
+            if self._text_transform_update_depth == 0:
+                self._flush_text_transform_update()
+
+    def _request_text_transform_update(self) -> None:
+        self._text_transform_update_dirty = True
+        if self._text_transform_update_depth == 0:
+            self._flush_text_transform_update()
+
+    def _flush_text_transform_update(self) -> None:
+        if not self._text_transform_update_dirty:
+            return
+        self._text_transform_update_dirty = False
+        self.refresh_cache_policy()
+        if self.is_editting():
+            self.updateMicroFocus()
+
+    def _compensated_text_transform(
+        self,
+        values: TextTransform,
+        *,
+        angle: Optional[float] = None,
+        box_pivot: Optional[QPointF] = None,
+        rotation_pivot: Optional[QPointF] = None,
+    ):
+        """Build the derived Qt base transform for the current item state.
+
+        ``transformations()`` must stay empty: arbitrary QGraphicsTransform
+        entries add another non-commuting stage that this conjugation does not
+        model.
+        """
+        if self.transformations():
+            raise RuntimeError(
+                'TextBlkItem requires an empty QGraphicsTransform list'
+            )
+        if angle is None:
+            angle = self.rotation()
+        if box_pivot is None:
+            box_pivot = self.logical_unpadded_rect().center()
+        if rotation_pivot is None:
+            rotation_pivot = self.transformOriginPoint()
+        return compensated_text_transform_matrix(
+            values.horizontal_scale,
+            values.vertical_scale,
+            values.slant_angle,
+            box_pivot,
+            angle,
+            rotation_pivot,
+        )
+
+    def _install_compensated_text_transform(
+        self,
+        values: TextTransform,
+        *,
+        angle: Optional[float] = None,
+        box_pivot: Optional[QPointF] = None,
+        rotation_pivot: Optional[QPointF] = None,
+    ) -> bool:
+        """Install the derived Qt base transform without lifecycle effects."""
+        matrix = self._compensated_text_transform(
+            values,
+            angle=angle,
+            box_pivot=box_pivot,
+            rotation_pivot=rotation_pivot,
+        )
+        if self.transform() == matrix:
+            return False
+        self._installing_text_transform = True
+        try:
+            self.setTransform(matrix, combine=False)
+        finally:
+            self._installing_text_transform = False
+        return True
+
+    @staticmethod
+    def _finite_point(point: QPointF) -> bool:
+        return math.isfinite(point.x()) and math.isfinite(point.y())
+
+    @staticmethod
+    def _validated_rotation_angle(angle) -> float:
+        if isinstance(angle, bool):
+            raise ValueError('rotation angle must be a finite number')
+        try:
+            angle = float(angle)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(
+                'rotation angle must be a finite number'
+            ) from error
+        if not math.isfinite(angle):
+            raise ValueError('rotation angle must be a finite number')
+        return angle
+
+    def _report_rejected_item_change(self, change, error) -> None:
+        try:
+            LOGGER.warning(
+                f'Rejected unsafe TextBlkItem graphics change {change}: '
+                f'{error}'
+            )
+        except Exception:
+            # Logging must never turn a rejected Qt virtual callback into an
+            # exception crossing the C++/Python boundary.
+            pass
+
+    def _item_change(self, change, value):
+        if getattr(self, '_installing_text_transform', False):
+            return super().itemChange(change, value)
+
+        if change in (
+            QGraphicsItem.GraphicsItemChange.ItemRotationChange,
+            QGraphicsItem.GraphicsItemChange.ItemTransformOriginPointChange,
+        ):
+            candidate = super().itemChange(change, value)
+            try:
+                if change == QGraphicsItem.GraphicsItemChange.ItemRotationChange:
+                    angle = float(candidate)
+                    if not math.isfinite(angle):
+                        raise ValueError('rotation angle must be finite')
+                    rotation_pivot = self.transformOriginPoint()
+                else:
+                    rotation_pivot = QPointF(candidate)
+                    if not self._finite_point(rotation_pivot):
+                        raise ValueError(
+                            'transform origin coordinates must be finite'
+                        )
+                    angle = self.rotation()
+
+                if self.blk is not None:
+                    # Validate every derived input while Qt can still reject
+                    # the property write by returning the current value.
+                    self._compensated_text_transform(
+                        self._effective_text_transform(),
+                        angle=angle,
+                        box_pivot=self.logical_unpadded_rect().center(),
+                        rotation_pivot=rotation_pivot,
+                    )
+                elif self.transformations():
+                    raise RuntimeError(
+                        'TextBlkItem requires an empty QGraphicsTransform list'
+                    )
+            except Exception as error:
+                self._report_rejected_item_change(change, error)
+                if change == QGraphicsItem.GraphicsItemChange.ItemRotationChange:
+                    return self.rotation()
+                return QPointF(self.transformOriginPoint())
+            return candidate
+
+        if change in (
+            QGraphicsItem.GraphicsItemChange.ItemRotationHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemTransformOriginPointHasChanged,
+        ) and self.blk is not None:
+            # At HasChanged the Qt property already contains its final value.
+            # Installing here makes nested transform notifications and the
+            # later public rotationChanged signal observe one coherent map.
+            with self._text_transform_update():
+                self._install_compensated_text_transform(
+                    self._effective_text_transform(),
+                    angle=self.rotation(),
+                    box_pivot=self.logical_unpadded_rect().center(),
+                    rotation_pivot=self.transformOriginPoint(),
+                )
+                result = super().itemChange(change, value)
+                self._request_text_transform_update()
+            return result
+
+        result = super().itemChange(change, value)
+        if change in (
+            QGraphicsItem.GraphicsItemChange.ItemScaleHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemTransformHasChanged,
+        ):
+            self._request_text_transform_update()
+        return result
+
+    def itemChange(self, change, value):
+        """Keep all exceptions inside Qt's C++ virtual-call boundary."""
+        try:
+            return self._item_change(change, value)
+        except Exception as error:
+            self._report_rejected_item_change(change, error)
+            try:
+                return super().itemChange(change, value)
+            except Exception:
+                return value
+
     def refresh_cache_policy(self) -> bool:
         """Apply the sole QGraphicsItem cache policy for live text items."""
         use_no_cache = (
             self.is_editting()
             or not self.transform().isIdentity()
             or self.rotation() != 0
+            or self.scale() != 1
         )
         cache_mode = (
             QGraphicsItem.CacheMode.NoCache
@@ -962,18 +1182,10 @@ class TextBlkItem(QGraphicsTextItem):
         self._background_pixmap_scale = None
 
     def _apply_text_transform(self, values: TextTransform) -> bool:
-        matrix = text_transform_matrix(
-            values.horizontal_scale,
-            values.vertical_scale,
-            values.slant_angle,
-            pivot=self.logical_unpadded_rect().center(),
-        )
-        changed = self.transform() != matrix
-        if changed:
-            self.setTransform(matrix, combine=False)
-        self.refresh_cache_policy()
-        if changed and self.is_editting():
-            self.updateMicroFocus()
+        with self._text_transform_update():
+            changed = self._install_compensated_text_transform(values)
+            if changed:
+                self._request_text_transform_update()
         return changed
 
     def _apply_glyph_slant(self, angle: float) -> bool:
@@ -1043,14 +1255,17 @@ class TextBlkItem(QGraphicsTextItem):
 
     def setCenterTransform(self) -> bool:
         center = self.logical_unpadded_rect().center()
-        origin_changed = self.transformOriginPoint() != center
-        if origin_changed:
-            self.setTransformOriginPoint(center)
-        transform_changed = self._apply_text_transform(
-            self._effective_text_transform()
-        )
-        if origin_changed and not transform_changed and self.is_editting():
-            self.updateMicroFocus()
+        with self._text_transform_update():
+            origin_changed = self.transformOriginPoint() != center
+            if origin_changed:
+                self.setTransformOriginPoint(center)
+            transform_changed = self._install_compensated_text_transform(
+                self._effective_text_transform(),
+                box_pivot=center,
+                rotation_pivot=self.transformOriginPoint(),
+            )
+            if transform_changed:
+                self._request_text_transform_update()
         return origin_changed or transform_changed
 
     def logical_unpadded_rect(self) -> QRectF:
@@ -1193,18 +1408,23 @@ class TextBlkItem(QGraphicsTextItem):
         path.addRect(self.logical_unpadded_rect())
         return path
 
+    def setTransformations(self, transformations) -> None:
+        """Reject transform-list stages outside this item's affine contract."""
+        if transformations:
+            raise RuntimeError(
+                'TextBlkItem requires an empty QGraphicsTransform list'
+            )
+        super().setTransformations(transformations)
+
     def setScale(self, scale: float) -> None:
-        self.setTransformOriginPoint(0, 0)
-        super().setScale(scale)
-        self.setCenterTransform()
+        with self._text_transform_update():
+            self.setCenterTransform()
+            super().setScale(scale)
 
     def setRotation(self, angle: float) -> None:
-        if self.rotation() == angle:
-            return
+        # Qt meta-property writes bypass this Python override; itemChange() is
+        # the authoritative compensation and finalization path.
         super().setRotation(angle)
-        self.refresh_cache_policy()
-        if self.is_editting():
-            self.updateMicroFocus()
 
     @property
     def angle(self) -> int:
@@ -1214,10 +1434,17 @@ class TextBlkItem(QGraphicsTextItem):
         raise NotImplementedError
 
     def setAngle(self, angle: int):
-        self.setCenterTransform()
-        if self.blk.angle != angle:
-            self.setRotation(angle)
-        self.blk.angle = angle
+        angle = self._validated_rotation_angle(angle)
+
+        with self._text_transform_update():
+            self.setCenterTransform()
+            # Preview/meta-property paths intentionally do not mutate the
+            # model, so the live Qt property is the authoritative comparison.
+            if self.rotation() != angle:
+                self.setRotation(angle)
+            if self.rotation() != angle:
+                raise RuntimeError('rotation change was rejected')
+            self.blk.angle = angle
 
     def setVertical(self, vertical: bool):
 
@@ -2311,59 +2538,129 @@ class TextBlkItem(QGraphicsTextItem):
             mh += P
             mw += P
             self.set_size(mw, mh, set_layout_maxsize=True, set_blk_size=True)
-            if self.under_ctrl:
-                self.doc_size_changed.emit(self.idx)
             if repaint:
                 self.repaint_background()
 
-    def scene_scale_factor(self):
-        scale = 1
-        if hasattr(self.scene(), 'scale_factor'):
-            scale = self.scene().scale_factor
-        return scale
-            
-    def set_size(self, w: float, h: float, set_layout_maxsize=False, set_blk_size=True):
-        '''
-        rotation invariant
-        '''
+    def _size_alignment_anchor(self, rect: QRectF) -> QPointF:
+        """Return the semantic anchor preserved by automatic resizing."""
+        if (
+            self.fontformat.vertical
+            or self.fontformat.alignment == TextAlignment.Right
+        ):
+            return rect.topRight()
+        if self.fontformat.alignment == TextAlignment.Left:
+            return rect.topLeft()
+        return rect.center()
 
+    def set_size(
+        self,
+        w: float,
+        h: float,
+        set_layout_maxsize=False,
+        set_blk_size=True,
+    ):
+        """Resize while preserving the alignment anchor in parent space.
+
+        Layout relayout is synchronous and can enlarge the requested size.  A
+        blocked transaction prevents observers from seeing document geometry
+        paired with the old display rect; one final layout notification is
+        replayed after every derived geometry value is coherent. Reentrant
+        requests from that notification are coalesced and run afterward.
+        """
+        request = (w, h, set_layout_maxsize, set_blk_size)
+        if self._size_transaction_active:
+            self._pending_size_request = request
+            return
+
+        first_transaction_error = None
+        while request is not None:
+            self._pending_size_request = None
+            self._size_transaction_active = True
+            transaction_error = None
+            try:
+                self._set_size_transaction(*request)
+            except Exception as error:
+                transaction_error = error
+            finally:
+                self._size_transaction_active = False
+
+            pending_request = self._pending_size_request
+            self._pending_size_request = None
+            if (
+                transaction_error is not None
+                and first_transaction_error is None
+            ):
+                first_transaction_error = transaction_error
+
+            # A subscriber that repeats the active request should not create
+            # an endless sequence of identical relayout notifications.
+            request = (
+                None if pending_request == request else pending_request
+            )
+
+        # A notification subscriber's deferred request is honored even when
+        # the transaction it observed must ultimately report a relayout error.
+        if first_transaction_error is not None:
+            raise first_transaction_error
+
+    def _set_size_transaction(
+        self,
+        w: float,
+        h: float,
+        set_layout_maxsize: bool,
+        set_blk_size: bool,
+    ) -> None:
+        """Run one non-reentrant, observer-coherent size transaction."""
+        if self.transformations():
+            raise RuntimeError(
+                'TextBlkItem requires an empty QGraphicsTransform list'
+            )
+        old_rect = self.logical_unpadded_rect()
+        old_anchor_parent = self.mapToParent(
+            self._size_alignment_anchor(old_rect)
+        )
+
+        # Both the custom display rect and a synchronous QTextDocument relayout
+        # can change boundingRect(), so notify the scene before either mutation.
+        self.prepareGeometryChange()
+        signals_were_blocked = None
+        final_size = None
+        layout_error = None
         if set_layout_maxsize:
-            self.layout.setMaxSize(w, h)
+            signals_were_blocked = self.layout.blockSignals(True)
+        try:
+            if set_layout_maxsize:
+                try:
+                    self.layout.setMaxSize(w, h)
+                except Exception as error:
+                    # setMaxSize() mutates max/document geometry before its
+                    # synchronous relayout can fail. Reconcile the item to
+                    # that observable final layout state before re-raising.
+                    layout_error = error
+                final_size = QSizeF(self.layout.documentSize())
+                w = final_size.width()
+                h = final_size.height()
 
-        old_w = self._display_rect.width()
-        old_h = self._display_rect.height()
+            with self._text_transform_update():
+                self._display_rect.setWidth(w)
+                self._display_rect.setHeight(h)
+                self.setCenterTransform()
+                new_rect = self.logical_unpadded_rect()
+                new_anchor_parent = self.mapToParent(
+                    self._size_alignment_anchor(new_rect)
+                )
+                self.setPos(
+                    self.pos() + old_anchor_parent - new_anchor_parent
+                )
 
-        oc = self.sceneBoundingRect().center()
-        self._display_rect.setWidth(w)
-        self._display_rect.setHeight(h)
-        self.setCenterTransform()
-        pos_shift = oc - self.sceneBoundingRect().center()
-        pos_shift = pos_shift / self.scene_scale_factor()
-        
-        align_c = align_tl = align_tr = False
-        if self.fontformat.vertical:
-            align_tr = True
-        else:
-            alignment = self.fontformat.alignment
-            if alignment == TextAlignment.Left:
-                align_tl = True
-            elif alignment == TextAlignment.Right:
-                align_tr = True
-            else:
-                align_c = True
+            if self.blk is not None and set_blk_size:
+                self.blk._bounding_rect = self.absBoundingRect()
+        finally:
+            if set_layout_maxsize:
+                self.layout.blockSignals(signals_were_blocked)
 
-        if align_c:
-            pass
-        else:
-            dw, dh = (w - old_w) / 2, (h - old_h) / 2
-            if align_tr:
-                dw = -dw
-            rad = -np.deg2rad(self.rotation())
-            c, s = np.cos(rad), np.sin(rad)
-            dx = c * dw + s * dh
-            dy = -s * dw + c * dh
-            pos_shift = pos_shift + QPointF(dx, dy)
+        if set_layout_maxsize and not signals_were_blocked:
+            self.layout.documentSizeChanged.emit(QSizeF(final_size))
 
-        self.setPos(self.pos() + pos_shift)
-        if self.blk is not None and set_blk_size:
-            self.blk._bounding_rect = self.absBoundingRect()
+        if layout_error is not None:
+            raise layout_error
