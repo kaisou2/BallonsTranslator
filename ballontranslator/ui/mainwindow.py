@@ -1,5 +1,6 @@
 import os.path as osp
 import os, re, traceback, sys
+import copy
 from typing import List, Union
 from pathlib import Path
 import subprocess
@@ -91,6 +92,24 @@ def _apply_global_text_transforms(block: TextBlock, global_format: FontFormat) -
         block.fontformat.glyph_slant_angle,
     ) = target
     return True
+
+
+def _apply_global_text_effects(
+    block: TextBlock,
+    global_format: FontFormat,
+) -> None:
+    """Copy the global effect fields without sharing mutable values."""
+    target = block.fontformat
+    target.opacity = global_format.opacity
+    target.shadow_radius = global_format.shadow_radius
+    target.shadow_strength = global_format.shadow_strength
+    target.shadow_color = copy.deepcopy(global_format.shadow_color)
+    target.shadow_offset = copy.deepcopy(global_format.shadow_offset)
+    target.gradient_enabled = global_format.gradient_enabled
+    target.gradient_start_color = copy.deepcopy(global_format.gradient_start_color)
+    target.gradient_end_color = copy.deepcopy(global_format.gradient_end_color)
+    target.gradient_angle = global_format.gradient_angle
+    target.gradient_size = global_format.gradient_size
 
 
 class MainWindow(mainwindow_cls):
@@ -1662,11 +1681,7 @@ class MainWindow(mainwindow_cls):
                     elif pcfg.module.enable_detect and not blk.src_is_vertical:
                         blk.recalulate_alignment()
                     if override_effect:
-                        blk.opacity = gf.opacity
-                        blk.shadow_color = gf.shadow_color
-                        blk.shadow_radius = gf.shadow_radius
-                        blk.shadow_strength = gf.shadow_strength
-                        blk.shadow_offset = gf.shadow_offset
+                        _apply_global_text_effects(blk, gf)
                     if override_writing_mode:
                         blk.vertical = gf.vertical
                     if override_font_family or blk.font_family is None:
