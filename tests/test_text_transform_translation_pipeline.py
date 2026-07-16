@@ -3,6 +3,7 @@ import os
 import sys
 import unittest
 import weakref
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ from ballontranslator.ui.mainwindow import (
     _apply_global_text_transforms,
 )
 from ballontranslator.ui.module_manager import ModuleManager
+from ballontranslator.ui.scenetext_manager import SceneTextManager
 from ballontranslator.utils.config import pcfg
 from ballontranslator.utils.fontformat import FontFormat
 from ballontranslator.utils.textblock import TextBlock
@@ -681,6 +683,69 @@ class TextTransformTranslationPipelineTests(unittest.TestCase):
         self.assertEqual(block.rich_text, '<p>translation</p>')
         self.assertEqual(harness.imgtrans_proj.saved, 1)
 
+    def test_inpaint_only_clears_stale_auto_layout_before_scene_refresh(self):
+        pcfg.module.enable_detect = False
+        pcfg.module.enable_ocr = False
+        pcfg.module.enable_translate = False
+        pcfg.module.enable_inpaint = True
+        block = TextBlock(
+            translation='keep translation',
+            rich_text='<p>keep rich text</p>',
+            fontformat=FontFormat(font_family='Untouched', font_size=27),
+        )
+        harness = _PipelineHarness([block], FontFormat())
+        layout_calls = []
+        model_write_calls = []
+
+        scene_manager = SimpleNamespace(
+            auto_textlayout_flag=True,
+            textblk_item_list=[],
+            text_overlay_manager=SimpleNamespace(
+                batch_update=lambda: nullcontext()
+            ),
+            imgtrans_proj=SimpleNamespace(
+                current_block_list=lambda: [block]
+            ),
+            formatpanel=SimpleNamespace(
+                familybox=SimpleNamespace(currentText=lambda: 'Fallback')
+            ),
+            clearSceneTextitems=lambda: None,
+            updateTextBlkList=lambda: model_write_calls.append(block),
+        )
+
+        def add_text_block(candidate):
+            # This is the auto-layout gate in SceneTextManager.addTextBlock();
+            # updateSceneTextitems itself is the production implementation.
+            if scene_manager.auto_textlayout_flag and not candidate.vertical:
+                layout_calls.append(candidate)
+                candidate.translation = 'unexpected layout mutation'
+
+        scene_manager.addTextBlock = add_text_block
+        scene_manager.updateSceneTextitems = lambda: (
+            SceneTextManager.updateSceneTextitems(scene_manager)
+        )
+        harness.st_manager = scene_manager
+        before = copy.deepcopy(vars(block))
+
+        self.assertTrue(harness.run_imgtrans())
+        self.assertFalse(harness.st_manager.auto_textlayout_flag)
+        # on_run_imgtrans intentionally synchronizes pending user edits before
+        # launch; only writes caused by the completion scene refresh matter.
+        model_write_calls.clear()
+        self._run_page(harness)
+
+        self.assertEqual(layout_calls, [])
+        self.assertEqual(model_write_calls, [])
+        self.assertEqual(vars(block), before)
+
+    def test_terminal_cleanup_resets_auto_layout_state(self):
+        harness = _PipelineHarness([TextBlock()], FontFormat())
+        harness.st_manager.auto_textlayout_flag = True
+
+        harness._clear_imgtrans_run_state()
+
+        self.assertFalse(harness.st_manager.auto_textlayout_flag)
+
     def test_preserve_cancel_does_not_leak_into_next_normal_run(self):
         block = TextBlock(
             fontformat=FontFormat(
@@ -751,11 +816,20 @@ class TextTransformTranslationPipelineTests(unittest.TestCase):
             imgtrans_proj=SimpleNamespace(is_empty=True),
             progress_msgbox=SimpleNamespace(hide=lambda: hidden.append(True)),
             imgtrans_pipeline_finished=finished,
+            _imgtrans_terminal_emitted=True,
+        )
+        manager._finish_imgtrans_pipeline_once = (
+            lambda: ModuleManager._finish_imgtrans_pipeline_once(manager)
         )
 
         self.assertFalse(ModuleManager.runImgtransPipeline(manager))
         self.assertEqual(finished.calls, 1)
         self.assertEqual(hidden, [True])
+
+        # A later invocation gets a fresh terminal guard.
+        self.assertFalse(ModuleManager.runImgtransPipeline(manager))
+        self.assertEqual(finished.calls, 2)
+        self.assertEqual(hidden, [True, True])
 
     def test_async_module_preparation_failure_emits_pipeline_finished(self):
         finished = _FakeSignal()
@@ -766,8 +840,13 @@ class TextTransformTranslationPipelineTests(unittest.TestCase):
         manager = SimpleNamespace(
             imgtrans_proj=SimpleNamespace(is_empty=False, num_pages=1),
             imgtrans_pipeline_finished=finished,
+            progress_msgbox=SimpleNamespace(hide=lambda: None),
             terminateRunningThread=lambda: None,
             _prepare_modules_then=fail_preparation,
+            _imgtrans_terminal_emitted=True,
+        )
+        manager._finish_imgtrans_pipeline_once = (
+            lambda: ModuleManager._finish_imgtrans_pipeline_once(manager)
         )
 
         self.assertTrue(ModuleManager.runImgtransPipeline(manager))

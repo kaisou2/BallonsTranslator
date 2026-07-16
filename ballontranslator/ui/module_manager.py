@@ -130,6 +130,7 @@ class ModuleThread(QThread):
         self.num_process_pages = 0
         self.imgtrans_proj: ProjImgTrans = None
         self.pipeline_stop_event = None
+        self._running_pipeline_job = False
         # Shared with download helpers so Stop can cancel preparation cooperatively.
         self.cancel_event = threading.Event()
         self.last_set_success = False
@@ -312,11 +313,13 @@ class ModuleThread(QThread):
         self.finished_counter = 0
         self.pipeline_pagekey_queue.clear()
         self.pipeline_stop_event = stop_event
+        self._running_pipeline_job = True
 
     def requestCancelModuleInit(self):
         self.cancel_event.set()
 
     def run(self):
+        running_pipeline_job = self._running_pipeline_job
         try:
             if self.job is not None:
                 self.job()
@@ -334,10 +337,15 @@ class ModuleThread(QThread):
                 self.pipeline_stop_event.set()
         except LLMRequestStopped:
             LOGGER.info(f'{self.module_key} task stopped by user.')
+            if running_pipeline_job and self.pipeline_stop_event is not None:
+                self.pipeline_stop_event.set()
         except Exception as e:
+            if running_pipeline_job and self.pipeline_stop_event is not None:
+                self.pipeline_stop_event.set()
             create_error_dialog(e, self.tr('Module task failed.'), f'ModuleThreadFailed:{self.module_key}')
         finally:
             self.job = None
+            self._running_pipeline_job = False
 
 
 class InpaintThread(ModuleThread):
@@ -683,6 +691,7 @@ class ImgtransThread(QThread):
         self.imgtrans_proj: ProjImgTrans = None
         self.stop_event = threading.Event()
         self._pipeline_stop_emitted = False
+        self._running_imgtrans_pipeline = False
         self.pages_to_process = None
         register_global_callback('user_request_stop', self.isStopRequested)
 
@@ -725,6 +734,7 @@ class ImgtransThread(QThread):
         self.pages_to_process = pages_to_process  # 保存需要处理的页面列表
         self.num_pages = len(self.imgtrans_proj.pages)
         self.clearStopRequest()
+        self._running_imgtrans_pipeline = True
         # 创建处理索引到实际页面索引的映射
         self.process_idx_to_page_idx = {}
         self.job = self._imgtrans_pipeline
@@ -740,6 +750,7 @@ class ImgtransThread(QThread):
 
     def runBlktransPipeline(self, blk_list: List[TextBlock], mode: int, blk_ids: List[int]):
         self.clearStopRequest()
+        self._running_imgtrans_pipeline = False
         self.job = lambda : self._blktrans_pipeline(blk_list, mode, blk_ids)
         self.start()
 
@@ -1098,22 +1109,37 @@ class ImgtransThread(QThread):
         return self.inpaint_counter == self.num_pages or not cfg_module.enable_inpaint
 
     def run(self):
+        running_imgtrans_pipeline = self._running_imgtrans_pipeline
         try:
             if self.job is not None:
                 self.job()
         except LLMApiKeyRequiredError as e:
+            if running_imgtrans_pipeline:
+                self.requestStop()
             _show_llm_key_required_dialog(e)
         except LLMModelRequiredError as e:
+            if running_imgtrans_pipeline:
+                self.requestStop()
             _show_llm_model_required_dialog(e)
         except LLMBaseURLRequiredError as e:
+            if running_imgtrans_pipeline:
+                self.requestStop()
             _show_llm_base_url_required_dialog(e)
         except LLMRequestStopped:
             LOGGER.info('Image translation task stopped by user.')
-            self._emit_pipeline_stopped_if_ready(imgtrans_running=False)
+            if running_imgtrans_pipeline:
+                self.requestStop()
         except Exception as e:
+            if running_imgtrans_pipeline:
+                self.requestStop()
             create_error_dialog(e, self.tr('Image translation failed.'), 'ImageTranslationFailed')
         finally:
             self.job = None
+            if running_imgtrans_pipeline:
+                # If parallel translation is still draining, this helper waits
+                # for its finished signal. Otherwise it emits exactly once now.
+                self._emit_pipeline_stopped_if_ready(imgtrans_running=False)
+            self._running_imgtrans_pipeline = False
 
     def recent_finished_index(self, ref_counter: int) -> int:
         if cfg_module.enable_detect:
@@ -1181,6 +1207,7 @@ class ModuleManager(QObject):
         self.package_install_thread: PackageInstallThread = None
         self.config_panel: ConfigPanel = None
         self.parent_widget = None
+        self._imgtrans_terminal_emitted = True
 
     def setupThread(self, config_panel: ConfigPanel, imgtrans_progress_msgbox: ImgtransProgressMessageBox, ocr_postprocess: Callable = None, translate_preprocess: Callable = None, translate_postprocess: Callable = None, parent_widget=None):
         self.config_panel = config_panel
@@ -1732,10 +1759,18 @@ class ModuleManager(QObject):
         msgbox.exec()
         return self._install_and_auto_install_checked(msgbox, install_btn, auto_install_checker)
 
-    def _install_missing_packages_and_retry(self, thread: ModuleThread, requirements: List[str], retry_key: tuple):
+    def _install_missing_packages_and_retry(self, thread: ModuleThread, requirements: List[str], retry_key: tuple) -> bool:
         accepted, torch_device, torch_cuda_version = self._confirm_torch_install_device(requirements)
         if not accepted:
-            return
+            # The caller treats this helper as the terminal handler for the
+            # missing-package branch. Cancel must therefore close a queued RUN
+            # instead of leaving its success callback available to a later
+            # standalone module preparation.
+            if self._pending_prepare_success is not None or self._pending_prepare_failure is not None:
+                self._finish_pending_prepare_failure()
+            else:
+                self._clear_install_retry_if_standalone_prepare()
+            return False
         self._package_install_retried.add(retry_key)
         self._show_prepare_dialog(thread, thread.last_set_module_name)
         thread.installMissingPackagesAndSetModule(
@@ -1744,6 +1779,7 @@ class ModuleManager(QObject):
             torch_device=torch_device,
             torch_cuda_version=torch_cuda_version,
         )
+        return True
 
     def _show_module_prepare_failure(self, thread: ModuleThread):
         if thread.last_error is None:
@@ -1844,10 +1880,10 @@ class ModuleManager(QObject):
 
     def runImgtransPipeline(self, pages_to_process=None):
         _reset_llm_key_required_dialogs()
+        self._imgtrans_terminal_emitted = False
         if self.imgtrans_proj.is_empty:
             LOGGER.info('proj file is empty, nothing to do')
-            self.progress_msgbox.hide()
-            self.imgtrans_pipeline_finished.emit()
+            self._finish_imgtrans_pipeline_once()
             return False
         self.last_finished_index = -1
         self.terminateRunningThread()
@@ -1855,7 +1891,7 @@ class ModuleManager(QObject):
         if cfg_module.all_stages_disabled() and self.imgtrans_proj is not None and self.imgtrans_proj.num_pages > 0:
             for ii in range(self.imgtrans_proj.num_pages):
                 self.page_trans_finished.emit(ii)
-            self.imgtrans_pipeline_finished.emit()
+            self._finish_imgtrans_pipeline_once()
             return True
 
         required_modules = []
@@ -1870,7 +1906,7 @@ class ModuleManager(QObject):
         self._prepare_modules_then(
             required_modules,
             lambda: self._startImgtransPipeline(pages_to_process),
-            on_failure=self.imgtrans_pipeline_finished.emit,
+            on_failure=self._finish_imgtrans_pipeline_once,
         )
         return True
 
@@ -1978,16 +2014,21 @@ class ModuleManager(QObject):
             return True
         return False
 
-    def finishImgtransPipeline(self):
-        if self.proj_finished():
-            self.progress_msgbox.hide()
-            self.imgtrans_pipeline_finished.emit()
-    
-    def on_imgtrans_thread_stopped(self):
-        """线程完成时确保关闭进度对话框"""
-        # 线程完成了，直接关闭窗口
+    def _finish_imgtrans_pipeline_once(self) -> bool:
+        if self._imgtrans_terminal_emitted:
+            return False
+        self._imgtrans_terminal_emitted = True
         self.progress_msgbox.hide()
         self.imgtrans_pipeline_finished.emit()
+        return True
+
+    def finishImgtransPipeline(self):
+        if self.proj_finished():
+            self._finish_imgtrans_pipeline_once()
+    
+    def on_imgtrans_thread_stopped(self):
+        """Finalize a stopped or failed image-translation invocation."""
+        self._finish_imgtrans_pipeline_once()
 
     def _select_module(self, module_key: str, module_name: str, valid_modules: List[str]):
         if module_name is None:

@@ -1572,6 +1572,9 @@ class MainWindow(mainwindow_cls):
         self._run_imgtrans_wo_textstyle_update = False
         self._textstyle_preserve_warning_pages.clear()
         self.postprocess_mt_toggle = True
+        # Auto-layout is invocation-scoped. A partial, stopped, or failed RUN
+        # must not let it affect a later inpaint-only scene refresh.
+        self.st_manager.auto_textlayout_flag = False
 
     def on_imgtrans_pipeline_finished(self):
         self._clear_imgtrans_run_state()
