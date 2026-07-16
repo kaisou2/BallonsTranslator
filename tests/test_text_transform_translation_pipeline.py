@@ -819,7 +819,10 @@ class TextTransformTranslationPipelineTests(unittest.TestCase):
             _imgtrans_terminal_emitted=True,
         )
         manager._finish_imgtrans_pipeline_once = (
-            lambda: ModuleManager._finish_imgtrans_pipeline_once(manager)
+            lambda generation=None: ModuleManager._finish_imgtrans_pipeline_once(
+                manager,
+                generation,
+            )
         )
 
         self.assertFalse(ModuleManager.runImgtransPipeline(manager))
@@ -843,10 +846,14 @@ class TextTransformTranslationPipelineTests(unittest.TestCase):
             progress_msgbox=SimpleNamespace(hide=lambda: None),
             terminateRunningThread=lambda: None,
             _prepare_modules_then=fail_preparation,
+            _startImgtransPipeline=lambda *_args: None,
             _imgtrans_terminal_emitted=True,
         )
         manager._finish_imgtrans_pipeline_once = (
-            lambda: ModuleManager._finish_imgtrans_pipeline_once(manager)
+            lambda generation=None: ModuleManager._finish_imgtrans_pipeline_once(
+                manager,
+                generation,
+            )
         )
 
         self.assertTrue(ModuleManager.runImgtransPipeline(manager))

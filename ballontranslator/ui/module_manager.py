@@ -1,4 +1,5 @@
 import threading
+from functools import partial
 from typing import Union, List, Callable
 import os.path as osp
 
@@ -1058,6 +1059,8 @@ class ImgtransThread(QThread):
                         break
                     except Exception as e:
                         create_error_dialog(e, self.tr('Inpainting Failed.'), 'InpaintFailed')
+                        self.requestStop()
+                        break
                     
                 self.inpaint_counter += 1
                 self.imgtrans_proj.update_page_progress(imgname, RunStatus.FIN_INPAINT)
@@ -1095,7 +1098,6 @@ class ImgtransThread(QThread):
 
     def translate_finished(self) -> bool:
         if self.imgtrans_proj is None \
-            or not cfg_module.enable_ocr \
             or not cfg_module.enable_translate:
             return True
         if self.parallel_trans:
@@ -1208,6 +1210,11 @@ class ModuleManager(QObject):
         self.config_panel: ConfigPanel = None
         self.parent_widget = None
         self._imgtrans_terminal_emitted = True
+        self._imgtrans_generation = 0
+        self._active_imgtrans_generation = 0
+        self._imgtrans_run_started = False
+        self._imgtrans_outcome_pending = None
+        self._imgtrans_run_signal_connections = []
 
     def setupThread(self, config_panel: ConfigPanel, imgtrans_progress_msgbox: ImgtransProgressMessageBox, ocr_postprocess: Callable = None, translate_preprocess: Callable = None, translate_postprocess: Callable = None, parent_widget=None):
         self.config_panel = config_panel
@@ -1217,7 +1224,6 @@ class ModuleManager(QObject):
         self.ocr_thread = OCRThread()
         
         self.translate_thread = TranslateThread()
-        self.translate_thread.progress_changed.connect(self.on_update_translate_progress)
         self.translate_thread.finish_translate_page.connect(self.on_finish_translate_page)  
 
         self.inpaint_thread = InpaintThread()
@@ -1240,13 +1246,8 @@ class ModuleManager(QObject):
 
         self.imgtrans_thread = ImgtransThread(self.textdetect_thread, self.ocr_thread, self.translate_thread, self.inpaint_thread)
         self.imgtrans_thread.imgtrans_proj = self.imgtrans_proj
-        self.imgtrans_thread.update_detect_progress.connect(self.on_update_detect_progress)
-        self.imgtrans_thread.update_ocr_progress.connect(self.on_update_ocr_progress)
-        self.imgtrans_thread.update_translate_progress.connect(self.on_update_translate_progress)
-        self.imgtrans_thread.update_inpaint_progress.connect(self.on_update_inpaint_progress)
         self.imgtrans_thread.finish_blktrans_stage.connect(self.on_finish_blktrans_stage)
         self.imgtrans_thread.finish_blktrans.connect(self.on_finish_blktrans)
-        self.imgtrans_thread.pipeline_stopped.connect(self.on_imgtrans_thread_stopped)
 
         self.translator_panel = translator_panel = config_panel.trans_config_panel        
         translator_params = merge_config_module_params(
@@ -1527,6 +1528,9 @@ class ModuleManager(QObject):
         self.prepare_msgbox.show_fitted()
 
     def on_batch_package_install_finished(self):
+        if self.package_install_thread.isRunning():
+            QTimer.singleShot(0, self.on_batch_package_install_finished)
+            return
         if not shared.HEADLESS:
             self.prepare_msgbox.done(0)
 
@@ -1676,6 +1680,12 @@ class ModuleManager(QObject):
             self.prepare_msgbox.updateTaskProgress(progress, message, verbose_message)
 
     def on_module_prepare_finished(self, thread: ModuleThread):
+        if hasattr(thread, 'isRunning') and thread.isRunning():
+            QTimer.singleShot(
+                0,
+                partial(self.on_module_prepare_finished, thread),
+            )
+            return
         if self._preparing_thread is thread:
             if not shared.HEADLESS:
                 self.prepare_msgbox.done(0)
@@ -1880,10 +1890,34 @@ class ModuleManager(QObject):
 
     def runImgtransPipeline(self, pages_to_process=None):
         _reset_llm_key_required_dialogs()
+        if not getattr(self, '_imgtrans_terminal_emitted', True):
+            LOGGER.warning('Image translation pipeline is already running.')
+            return False
+        for thread_name in (
+            'imgtrans_thread',
+            'textdetect_thread',
+            'ocr_thread',
+            'translate_thread',
+            'inpaint_thread',
+            'package_install_thread',
+        ):
+            thread = getattr(self, thread_name, None)
+            if thread is not None and thread.isRunning():
+                LOGGER.warning(
+                    'Cannot start image translation while another module '
+                    'thread is running.'
+                )
+                return False
+
+        self._imgtrans_generation = getattr(self, '_imgtrans_generation', 0) + 1
+        generation = self._imgtrans_generation
+        self._active_imgtrans_generation = generation
         self._imgtrans_terminal_emitted = False
+        self._imgtrans_run_started = False
+        self._imgtrans_outcome_pending = None
         if self.imgtrans_proj.is_empty:
             LOGGER.info('proj file is empty, nothing to do')
-            self._finish_imgtrans_pipeline_once()
+            self._finish_imgtrans_pipeline_once(generation)
             return False
         self.last_finished_index = -1
         self.terminateRunningThread()
@@ -1891,7 +1925,7 @@ class ModuleManager(QObject):
         if cfg_module.all_stages_disabled() and self.imgtrans_proj is not None and self.imgtrans_proj.num_pages > 0:
             for ii in range(self.imgtrans_proj.num_pages):
                 self.page_trans_finished.emit(ii)
-            self._finish_imgtrans_pipeline_once()
+            self._finish_imgtrans_pipeline_once(generation)
             return True
 
         required_modules = []
@@ -1905,12 +1939,88 @@ class ModuleManager(QObject):
             required_modules.append(('inpainter', cfg_module.inpainter))
         self._prepare_modules_then(
             required_modules,
-            lambda: self._startImgtransPipeline(pages_to_process),
-            on_failure=self._finish_imgtrans_pipeline_once,
+            partial(
+                self._startImgtransPipeline,
+                pages_to_process,
+                generation,
+            ),
+            on_failure=partial(
+                self._finish_imgtrans_pipeline_once,
+                generation,
+            ),
         )
         return True
 
-    def _startImgtransPipeline(self, pages_to_process=None):
+    def _disconnect_imgtrans_run_signals(self):
+        connections = getattr(self, '_imgtrans_run_signal_connections', [])
+        self._imgtrans_run_signal_connections = []
+        for signal, slot in connections:
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+
+    def _connect_imgtrans_run_signals(self, generation: int):
+        self._disconnect_imgtrans_run_signals()
+        connections = [
+            (
+                self.translate_thread.progress_changed,
+                partial(
+                    self.on_update_translate_progress,
+                    generation=generation,
+                ),
+            ),
+            (
+                self.imgtrans_thread.update_detect_progress,
+                partial(
+                    self.on_update_detect_progress,
+                    generation=generation,
+                ),
+            ),
+            (
+                self.imgtrans_thread.update_ocr_progress,
+                partial(
+                    self.on_update_ocr_progress,
+                    generation=generation,
+                ),
+            ),
+            (
+                self.imgtrans_thread.update_translate_progress,
+                partial(
+                    self.on_update_translate_progress,
+                    generation=generation,
+                ),
+            ),
+            (
+                self.imgtrans_thread.update_inpaint_progress,
+                partial(
+                    self.on_update_inpaint_progress,
+                    generation=generation,
+                ),
+            ),
+            (
+                self.imgtrans_thread.pipeline_stopped,
+                partial(self.on_imgtrans_thread_stopped, generation),
+            ),
+            (
+                self.imgtrans_thread.finished,
+                partial(self._on_imgtrans_qthread_finished, generation),
+            ),
+            (
+                self.translate_thread.finished,
+                partial(self._on_imgtrans_qthread_finished, generation),
+            ),
+        ]
+        for signal, slot in connections:
+            signal.connect(slot)
+        self._imgtrans_run_signal_connections = connections
+
+    def _startImgtransPipeline(self, pages_to_process=None, generation=None):
+        if generation is None:
+            generation = self._active_imgtrans_generation
+        if generation != self._active_imgtrans_generation \
+                or self._imgtrans_terminal_emitted:
+            return
         if self.prepare_msgbox is not None and self.prepare_msgbox.isVisible():
             self.prepare_msgbox.done(0)
         self.progress_msgbox.detect_bar.setVisible(cfg_module.enable_detect)
@@ -1919,6 +2029,9 @@ class ModuleManager(QObject):
         self.progress_msgbox.inpaint_bar.setVisible(cfg_module.enable_inpaint)
         self.progress_msgbox.zero_progress()
         self.progress_msgbox.show_fitted()
+        self._connect_imgtrans_run_signals(generation)
+        self._imgtrans_run_started = True
+        self._imgtrans_outcome_pending = None
         self.imgtrans_thread.runImgtransPipeline(self.imgtrans_proj, pages_to_process)
     
     def stopImgtransPipeline(self):
@@ -1969,7 +2082,21 @@ class ModuleManager(QObject):
         self.blktrans_pipeline_finished.emit(mode, blk_ids)
         self.progress_msgbox.hide()
 
-    def _on_update_stage_progress(self, stage: str, progress: int, update_progress: Callable[[int], None]):
+    def _is_current_imgtrans_generation(self, generation: int) -> bool:
+        return generation == self._active_imgtrans_generation \
+            and not self._imgtrans_terminal_emitted \
+            and self._imgtrans_run_started
+
+    def _on_update_stage_progress(
+        self,
+        stage: str,
+        progress: int,
+        update_progress: Callable[[int], None],
+        generation=None,
+    ):
+        if generation is not None \
+                and not self._is_current_imgtrans_generation(generation):
+            return
         ri = self.imgtrans_thread.recent_finished_index(progress)
         if stage in shared.pbar:
             shared.pbar[stage].update(1)
@@ -1979,19 +2106,39 @@ class ModuleManager(QObject):
             self.last_finished_index = ri
             self.page_trans_finished.emit(ri)
         if progress == 100:
-            self.finishImgtransPipeline()
+            self.finishImgtransPipeline(generation)
 
-    def on_update_detect_progress(self, progress: int):
-        self._on_update_stage_progress('detect', progress, self.progress_msgbox.updateDetectProgress)
+    def on_update_detect_progress(self, progress: int, generation=None):
+        self._on_update_stage_progress(
+            'detect',
+            progress,
+            self.progress_msgbox.updateDetectProgress,
+            generation,
+        )
 
-    def on_update_ocr_progress(self, progress: int):
-        self._on_update_stage_progress('ocr', progress, self.progress_msgbox.updateOCRProgress)
+    def on_update_ocr_progress(self, progress: int, generation=None):
+        self._on_update_stage_progress(
+            'ocr',
+            progress,
+            self.progress_msgbox.updateOCRProgress,
+            generation,
+        )
 
-    def on_update_translate_progress(self, progress: int):
-        self._on_update_stage_progress('translate', progress, self.progress_msgbox.updateTranslateProgress)
+    def on_update_translate_progress(self, progress: int, generation=None):
+        self._on_update_stage_progress(
+            'translate',
+            progress,
+            self.progress_msgbox.updateTranslateProgress,
+            generation,
+        )
 
-    def on_update_inpaint_progress(self, progress: int):
-        self._on_update_stage_progress('inpaint', progress, self.progress_msgbox.updateInpaintProgress)
+    def on_update_inpaint_progress(self, progress: int, generation=None):
+        self._on_update_stage_progress(
+            'inpaint',
+            progress,
+            self.progress_msgbox.updateInpaintProgress,
+            generation,
+        )
 
     def progress(self):
         progress = {}
@@ -2014,21 +2161,61 @@ class ModuleManager(QObject):
             return True
         return False
 
-    def _finish_imgtrans_pipeline_once(self) -> bool:
+    def _try_finalize_imgtrans_pipeline(self, generation: int) -> bool:
+        if not self._is_current_imgtrans_generation(generation):
+            return False
+        if self._imgtrans_outcome_pending is None:
+            return False
+        if self.imgtrans_thread.isRunning() \
+                or self.translate_thread.isRunning():
+            return False
+        return self._finish_imgtrans_pipeline_once(generation)
+
+    def _on_imgtrans_qthread_finished(self, generation: int):
+        if not self._is_current_imgtrans_generation(generation):
+            return
+        if self.imgtrans_thread.isStopRequested():
+            self._imgtrans_outcome_pending = 'stopped'
+        self._try_finalize_imgtrans_pipeline(generation)
+
+    def _finish_imgtrans_pipeline_once(self, generation=None) -> bool:
+        if generation is not None \
+                and generation != self._active_imgtrans_generation:
+            return False
         if self._imgtrans_terminal_emitted:
             return False
         self._imgtrans_terminal_emitted = True
+        self._imgtrans_run_started = False
+        self._imgtrans_outcome_pending = None
+        self._active_imgtrans_generation = None
+        if hasattr(self, '_disconnect_imgtrans_run_signals'):
+            self._disconnect_imgtrans_run_signals()
         self.progress_msgbox.hide()
         self.imgtrans_pipeline_finished.emit()
         return True
 
-    def finishImgtransPipeline(self):
+    def finishImgtransPipeline(self, generation=None):
         if self.proj_finished():
-            self._finish_imgtrans_pipeline_once()
+            if generation is None:
+                self._finish_imgtrans_pipeline_once()
+                return
+            if not self._is_current_imgtrans_generation(generation):
+                return
+            if self.imgtrans_thread.isStopRequested():
+                self._imgtrans_outcome_pending = 'stopped'
+            elif self._imgtrans_outcome_pending != 'stopped':
+                self._imgtrans_outcome_pending = 'success'
+            self._try_finalize_imgtrans_pipeline(generation)
     
-    def on_imgtrans_thread_stopped(self):
+    def on_imgtrans_thread_stopped(self, generation=None):
         """Finalize a stopped or failed image-translation invocation."""
-        self._finish_imgtrans_pipeline_once()
+        if generation is None:
+            self._finish_imgtrans_pipeline_once()
+            return
+        if not self._is_current_imgtrans_generation(generation):
+            return
+        self._imgtrans_outcome_pending = 'stopped'
+        self._try_finalize_imgtrans_pipeline(generation)
 
     def _select_module(self, module_key: str, module_name: str, valid_modules: List[str]):
         if module_name is None:
