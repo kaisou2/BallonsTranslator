@@ -1072,11 +1072,25 @@ class TextBlkItem(QGraphicsTextItem):
             xywh = np.array([[bx1, by1, bx2-bx1, by2-by1]])
             blk.lines = xywh2xyxypoly(xywh).reshape(-1, 4, 2).tolist()
         self._text_transform_preview = None
+
         self.setVertical(blk.vertical)
         self.setRect(blk.bounding_rect(), update_blk_rect=False)
+
+        try:
+            block_angle = self._validated_rotation_angle(blk.angle)
+        except ValueError as error:
+            try:
+                LOGGER.warning(
+                    f'Reset invalid TextBlock rotation to 0 during load: '
+                    f'{error}'
+                )
+            except Exception:
+                pass
+            block_angle = 0.0
+        blk.angle = block_angle
         
-        if blk.angle != 0:
-            self.setRotation(blk.angle)
+        if block_angle != 0:
+            self.setRotation(block_angle)
         
         set_char_fmt = False
         if blk.translation:
@@ -1196,9 +1210,73 @@ class TextBlkItem(QGraphicsTextItem):
             self._installing_text_transform = False
         return True
 
-    def itemChange(self, change, value):
+    @staticmethod
+    def _finite_point(point: QPointF) -> bool:
+        return math.isfinite(point.x()) and math.isfinite(point.y())
+
+    @staticmethod
+    def _validated_rotation_angle(angle) -> float:
+        if isinstance(angle, bool):
+            raise ValueError('rotation angle must be a finite number')
+        try:
+            angle = float(angle)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(
+                'rotation angle must be a finite number'
+            ) from error
+        if not math.isfinite(angle):
+            raise ValueError('rotation angle must be a finite number')
+        return angle
+
+    def _report_rejected_item_change(self, change, error) -> None:
+        try:
+            LOGGER.warning(
+                f'Rejected unsafe TextBlkItem graphics change {change}: '
+                f'{error}'
+            )
+        except Exception:
+            # Logging must never turn a rejected Qt virtual callback into an
+            # exception crossing the C++/Python boundary.
+            pass
+
+    def _item_change(self, change, value):
         if getattr(self, '_installing_text_transform', False):
             return super().itemChange(change, value)
+
+        if change in (
+            QGraphicsItem.GraphicsItemChange.ItemRotationChange,
+            QGraphicsItem.GraphicsItemChange.ItemTransformOriginPointChange,
+        ):
+            candidate = super().itemChange(change, value)
+            try:
+                if change == QGraphicsItem.GraphicsItemChange.ItemRotationChange:
+                    angle = float(candidate)
+                    if not math.isfinite(angle):
+                        raise ValueError('rotation angle must be finite')
+                    rotation_pivot = self.transformOriginPoint()
+                else:
+                    rotation_pivot = QPointF(candidate)
+                    if not self._finite_point(rotation_pivot):
+                        raise ValueError(
+                            'transform origin coordinates must be finite'
+                        )
+                    angle = self.rotation()
+
+                if self.blk is not None:
+                    # Validate every derived input while Qt can still reject
+                    # the property write by returning the current value.
+                    self._compensated_text_transform(
+                        self._effective_text_transform(),
+                        angle=angle,
+                        box_pivot=self.logical_unpadded_rect().center(),
+                        rotation_pivot=rotation_pivot,
+                    )
+            except Exception as error:
+                self._report_rejected_item_change(change, error)
+                if change == QGraphicsItem.GraphicsItemChange.ItemRotationChange:
+                    return self.rotation()
+                return QPointF(self.transformOriginPoint())
+            return candidate
 
         if change in (
             QGraphicsItem.GraphicsItemChange.ItemRotationHasChanged,
@@ -1225,6 +1303,17 @@ class TextBlkItem(QGraphicsTextItem):
         ):
             self._request_text_transform_update()
         return result
+
+    def itemChange(self, change, value):
+        """Keep all exceptions inside Qt's C++ virtual-call boundary."""
+        try:
+            return self._item_change(change, value)
+        except Exception as error:
+            self._report_rejected_item_change(change, error)
+            try:
+                return super().itemChange(change, value)
+            except Exception:
+                return value
 
     def refresh_cache_policy(self) -> bool:
         """Apply the sole QGraphicsItem cache policy for live text items."""
@@ -1519,12 +1608,16 @@ class TextBlkItem(QGraphicsTextItem):
         raise NotImplementedError
 
     def setAngle(self, angle: int):
+        angle = self._validated_rotation_angle(angle)
+
         with self._text_transform_update():
             self.setCenterTransform()
             # Preview/meta-property paths intentionally do not mutate the
             # model, so the live Qt property is the authoritative comparison.
             if self.rotation() != angle:
                 self.setRotation(angle)
+            if self.rotation() != angle:
+                raise RuntimeError('rotation change was rejected')
             self.blk.angle = angle
 
     def setVertical(self, vertical: bool):
