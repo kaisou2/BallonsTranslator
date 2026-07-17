@@ -3,7 +3,7 @@ from typing import List, Union, Tuple
 import numpy as np
 import copy
 
-from qtpy.QtWidgets import QApplication, QWidget, QGraphicsItem
+from qtpy.QtWidgets import QApplication, QWidget
 from qtpy.QtCore import QObject, QRectF, Qt, Signal, QPointF
 from qtpy.QtGui import QKeyEvent, QTextCursor, QFontMetricsF, QFont, QTextCharFormat, QClipboard
 try:
@@ -981,7 +981,7 @@ class SceneTextManager(QObject):
         sender = self.sender()
         if isinstance(sender, TransTextEdit) and idx < len(self.textblk_item_list):
             blk_item = self.textblk_item_list[idx]
-            blk_item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+            blk_item.refresh_cache_policy()
 
     def on_push_textitem_undostack(self, num_steps: int, is_formatting: bool):
         blkitem: TextBlkItem = self.sender()
