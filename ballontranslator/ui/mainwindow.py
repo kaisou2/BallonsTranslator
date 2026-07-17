@@ -19,6 +19,7 @@ from ballontranslator.utils.message import create_error_dialog, create_info_dial
 from ballontranslator.modules import GET_VALID_TEXTDETECTORS, GET_VALID_INPAINTERS, GET_VALID_TRANSLATORS, GET_VALID_OCR
 from .misc import parse_stylesheet, set_html_family, QKEY
 from ballontranslator.utils.config import ProgramConfig, pcfg, save_config, text_styles, save_text_styles, load_textstyle_from, FontFormat
+from ballontranslator.utils.fontformat import normalize_text_transform
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans
 from .canvas import Canvas
 from .configpanel import ConfigPanel
@@ -60,6 +61,27 @@ class PageListView(QListWidget):
         return super().contextMenuEvent(e)
 
 mainwindow_cls = Widget if shared.HEADLESS else FramelessWindow
+
+
+def _apply_global_text_transforms(block: TextBlock, global_format: FontFormat) -> bool:
+    """Copy the normalized global transform quartet as one model update."""
+    target = normalize_text_transform(
+        global_format.horizontal_scale,
+        global_format.vertical_scale,
+        global_format.slant_angle,
+        global_format.glyph_slant_angle,
+    )
+    if block.fontformat.text_transform == target:
+        return False
+    (
+        block.fontformat.horizontal_scale,
+        block.fontformat.vertical_scale,
+        block.fontformat.slant_angle,
+        block.fontformat.glyph_slant_angle,
+    ) = target
+    return True
+
+
 class MainWindow(mainwindow_cls):
 
     imgtrans_proj: ProjImgTrans = ProjImgTrans()
@@ -1588,6 +1610,7 @@ class MainWindow(mainwindow_cls):
                     sw = blk.stroke_width
                     if sw > 0 and pcfg.module.enable_ocr and pcfg.module.enable_detect and not override_fnt_size:
                         blk.font_size = blk.font_size / (1 + sw)
+                    _apply_global_text_transforms(blk, gf)
 
             self.st_manager.auto_textlayout_flag = pcfg.let_autolayout_flag and \
                 (pcfg.module.enable_detect or pcfg.module.enable_translate)

@@ -84,38 +84,76 @@ class SetTextTransformCommand(QUndoCommand):
 
 
 class MoveBlkItemsCommand(QUndoCommand):
-    def __init__(self, items: List[TextBlkItem], shape_ctrl: TextBlkShapeControl):
+    def __init__(
+        self,
+        items: List[TextBlkItem],
+        shape_ctrl: Optional[TextBlkShapeControl] = None,
+        before_positions: Optional[Sequence[QPointF]] = None,
+        after_positions: Optional[Sequence[QPointF]] = None,
+        overlay_sync: Optional[Callable[[], None]] = None,
+    ):
         super(MoveBlkItemsCommand, self).__init__()
-        self.items = items
+        self.items = list(items)
         self.old_pos_lst: List[QPointF] = []
         self.new_pos_lst: List[QPointF] = []
         self.shape_ctrl = shape_ctrl
-        for item in items:
-            padding = item.padding()
-            padding = QPointF(padding, padding)
-            self.old_pos_lst.append(item.oldPos + padding)
-            self.new_pos_lst.append(item.pos() + padding)
+        self.overlay_sync = overlay_sync
+        if before_positions is not None and len(before_positions) != len(self.items):
+            raise ValueError('items and before_positions must have the same length')
+        if after_positions is not None and len(after_positions) != len(self.items):
+            raise ValueError('items and after_positions must have the same length')
+        for index, item in enumerate(self.items):
+            logical = item.logical_position()
+            logical_offset = logical - item.pos()
+            before = (
+                QPointF(before_positions[index])
+                if before_positions is not None
+                else item.oldPos + logical_offset
+            )
+            after = (
+                QPointF(after_positions[index])
+                if after_positions is not None
+                else logical
+            )
+            self.old_pos_lst.append(before)
+            self.new_pos_lst.append(after)
             item.oldPos = item.pos()
+        if self.old_pos_lst == self.new_pos_lst:
+            self.setObsolete(True)
+
+    def _refresh_overlays(self):
+        if self.overlay_sync is not None:
+            self.overlay_sync()
+        elif (
+            self.shape_ctrl is not None
+            and self.shape_ctrl.blk_item in self.items
+        ):
+            self.shape_ctrl.updateBoundingRect()
+
+    def _apply(self, positions: Sequence[QPointF]):
+        for item, position in zip(self.items, positions):
+            item.set_logical_position(position)
+            item.oldPos = item.pos()
+        self._refresh_overlays()
 
     def redo(self):
-        for item, new_pos in zip(self.items, self.new_pos_lst):
-            padding = item.padding()
-            padding = QPointF(padding, padding)
-            item.setPos(new_pos - padding)
-            if self.shape_ctrl.blk_item == item and self.shape_ctrl.pos() != new_pos:
-                self.shape_ctrl.setPos(new_pos)
+        self._apply(self.new_pos_lst)
 
     def undo(self):
-        for item, old_pos in zip(self.items, self.old_pos_lst):
-            padding = item.padding()
-            padding = QPointF(padding, padding)
-            item.setPos(old_pos - padding)
-            if self.shape_ctrl.blk_item == item and self.shape_ctrl.pos() != old_pos:
-                self.shape_ctrl.setPos(old_pos)
+        self._apply(self.old_pos_lst)
 
 
 class ApplyFontformatCommand(QUndoCommand):
-    def __init__(self, items: List[TextBlkItem], trans_widget_lst: List[TransTextEdit], fontformat: FontFormat):
+    """Apply the existing whole-format command and refresh transform overlays."""
+
+    def __init__(
+        self,
+        items: List[TextBlkItem],
+        trans_widget_lst: List[TransTextEdit],
+        fontformat: FontFormat,
+        shape_ctrl: Optional[TextBlkShapeControl] = None,
+        overlay_sync: Optional[Callable[[], None]] = None,
+    ):
         super(ApplyFontformatCommand, self).__init__()
         self.items = items
         self.old_html_lst = []
@@ -123,51 +161,93 @@ class ApplyFontformatCommand(QUndoCommand):
         self.old_fmt_lst = []
         self.new_fmt = fontformat
         self.trans_widget_lst = trans_widget_lst
+        self.shape_ctrl = shape_ctrl
+        self.overlay_sync = overlay_sync
         for item in items:
             self.old_html_lst.append(item.toHtml())
+            # get_fontformat() deep-copies FontFormat, including the canonical
+            # transform quartet, so the legacy undo path restores it as well.
             self.old_fmt_lst.append(item.get_fontformat())
             self.old_rect_lst.append(item.absBoundingRect(qrect=True))
+
+    def _finish(self):
+        if self.overlay_sync is not None:
+            self.overlay_sync()
+        elif (
+            self.shape_ctrl is not None
+            and self.shape_ctrl.blk_item in self.items
+        ):
+            self.shape_ctrl.updateBoundingRect()
 
     def redo(self):
         for item, edit in zip(self.items, self.trans_widget_lst):
             item.set_fontformat(self.new_fmt, set_char_format=True)
             edit.document().clearUndoRedoStacks()
+        self._finish()
 
     def undo(self):
-        for rect, item, html, fmt, edit in zip(self.old_rect_lst, self.items, self.old_html_lst, self.old_fmt_lst, self.trans_widget_lst):
+        for rect, item, html, fmt, edit in zip(
+            self.old_rect_lst,
+            self.items,
+            self.old_html_lst,
+            self.old_fmt_lst,
+            self.trans_widget_lst,
+        ):
             item.setHtml(html)
             item.set_fontformat(fmt)
             item.setRect(rect)
             edit.document().clearUndoRedoStacks()
+        self._finish()
 
     
 class ReshapeItemCommand(QUndoCommand):
-    def __init__(self, item: TextBlkItem):
+    def __init__(
+        self,
+        item: TextBlkItem,
+        shape_ctrl: Optional[TextBlkShapeControl] = None,
+        overlay_sync: Optional[Callable[[], None]] = None,
+    ):
         super(ReshapeItemCommand, self).__init__()
         self.item = item
+        self.shape_ctrl = shape_ctrl
+        self.overlay_sync = overlay_sync
         self.oldRect = item.oldRect
         self.newRect = item.absBoundingRect(qrect=True)
         self.idx = -1
+
+    def _refresh_shape_control(self):
+        if self.overlay_sync is not None:
+            self.overlay_sync()
+        elif self.shape_ctrl is not None and self.shape_ctrl.blk_item is self.item:
+            self.shape_ctrl.updateBoundingRect()
 
     def redo(self):
         if self.idx < 0:
             self.idx += 1
             return
         self.item.setRect(self.newRect)
+        self._refresh_shape_control()
 
     def undo(self):
         self.item.setRect(self.oldRect)
+        self._refresh_shape_control()
 
     def mergeWith(self, command: QUndoCommand):
         item = command.item
         if self.item != item:
             return False
-        self.newRect = item.rect()
+        self.newRect = item.absBoundingRect(qrect=True)
         return True
 
 
 class RotateItemCommand(QUndoCommand):
-    def __init__(self, item: Union[TextBlkItem, List[TextBlkItem]], new_angle: float = None, shape_ctrl: TextBlkShapeControl = None):
+    def __init__(
+        self,
+        item: Union[TextBlkItem, List[TextBlkItem]],
+        new_angle: float = None,
+        shape_ctrl: TextBlkShapeControl = None,
+        overlay_sync: Optional[Callable[[], None]] = None,
+    ):
         super(RotateItemCommand, self).__init__()
         self.items = item if isinstance(item, list) else [item]
         self.items = [item for item in self.items if item is not None]
@@ -177,18 +257,37 @@ class RotateItemCommand(QUndoCommand):
             new_angle = self.item.angle
         self.new_angle = new_angle
         self.shape_ctrl = shape_ctrl
+        self.overlay_sync = overlay_sync
+
+    def _refresh_overlays(self):
+        if self.overlay_sync is not None:
+            self.overlay_sync()
+        elif self.shape_ctrl is not None and self.shape_ctrl.blk_item in self.items:
+            self.shape_ctrl.updateBoundingRect()
 
     def redo(self):
         for item in self.items:
             item.setAngle(self.new_angle)
-            if self.shape_ctrl is not None and self.shape_ctrl.blk_item == item and self.shape_ctrl.rotation() != self.new_angle:
+            if (
+                self.overlay_sync is None
+                and self.shape_ctrl is not None
+                and self.shape_ctrl.blk_item == item
+                and self.shape_ctrl.rotation() != self.new_angle
+            ):
                 self.shape_ctrl.setRotation(self.new_angle)
+        self._refresh_overlays()
 
     def undo(self):
         for item, old_angle in zip(self.items, self.old_angles):
             item.setAngle(old_angle)
-            if self.shape_ctrl is not None and self.shape_ctrl.blk_item == item and self.shape_ctrl.rotation() != old_angle:
+            if (
+                self.overlay_sync is None
+                and self.shape_ctrl is not None
+                and self.shape_ctrl.blk_item == item
+                and self.shape_ctrl.rotation() != old_angle
+            ):
                 self.shape_ctrl.setRotation(old_angle)
+        self._refresh_overlays()
 
     def mergeWith(self, command: QUndoCommand):
         if not isinstance(command, RotateItemCommand):
@@ -255,11 +354,17 @@ class SqueezeCommand(QUndoCommand):
                 self.ctrl.updateBoundingRect()
 
 class ResetAngleCommand(QUndoCommand):
-    def __init__(self, blkitem_lst: List[TextBlkItem], ctrl: TextBlkShapeControl):
+    def __init__(
+        self,
+        blkitem_lst: List[TextBlkItem],
+        ctrl: TextBlkShapeControl,
+        overlay_sync: Optional[Callable[[], None]] = None,
+    ):
         super(ResetAngleCommand, self).__init__()
         self.blkitem_lst = blkitem_lst
         self.angle_lst = []
         self.ctrl = ctrl
+        self.overlay_sync = overlay_sync
         blkitem_lst = []
         for blk in self.blkitem_lst:
             rotation = blk.rotation()
@@ -271,14 +376,22 @@ class ResetAngleCommand(QUndoCommand):
     def redo(self):
         for blk in self.blkitem_lst:
             blk.setAngle(0)
-            if self.ctrl.blk_item == blk:
+            if self.overlay_sync is None and self.ctrl.blk_item == blk:
                 self.ctrl.setAngle(0)
+        self._refresh_overlays()
 
     def undo(self):
         for blk, angle in zip(self.blkitem_lst, self.angle_lst):
             blk.setAngle(angle)
-            if self.ctrl.blk_item == blk:
+            if self.overlay_sync is None and self.ctrl.blk_item == blk:
                 self.ctrl.setAngle(angle)
+        self._refresh_overlays()
+
+    def _refresh_overlays(self):
+        if self.overlay_sync is not None:
+            self.overlay_sync()
+        elif self.ctrl is not None and self.ctrl.blk_item in self.blkitem_lst:
+            self.ctrl.updateBoundingRect()
 
 class TextItemEditCommand(QUndoCommand):
     def __init__(self, blkitem: TextBlkItem, trans_edit: TransTextEdit, num_steps: int, formatpanel=None):
