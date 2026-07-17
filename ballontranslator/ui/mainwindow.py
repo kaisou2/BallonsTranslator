@@ -19,6 +19,7 @@ from ballontranslator.utils.message import create_error_dialog, create_info_dial
 from ballontranslator.modules import GET_VALID_TEXTDETECTORS, GET_VALID_INPAINTERS, GET_VALID_TRANSLATORS, GET_VALID_OCR
 from .misc import parse_stylesheet, set_html_family, QKEY
 from ballontranslator.utils.config import ProgramConfig, pcfg, save_config, text_styles, save_text_styles, load_textstyle_from, FontFormat
+from ballontranslator.utils.fontformat import normalize_text_transform
 from ballontranslator.utils.proj_imgtrans import ProjImgTrans
 from .canvas import Canvas
 from .configpanel import ConfigPanel
@@ -60,6 +61,27 @@ class PageListView(QListWidget):
         return super().contextMenuEvent(e)
 
 mainwindow_cls = Widget if shared.HEADLESS else FramelessWindow
+
+
+def _apply_global_text_transforms(block: TextBlock, global_format: FontFormat) -> bool:
+    """Copy the normalized global transform quartet as one model update."""
+    target = normalize_text_transform(
+        global_format.horizontal_scale,
+        global_format.vertical_scale,
+        global_format.slant_angle,
+        global_format.glyph_slant_angle,
+    )
+    if block.fontformat.text_transform == target:
+        return False
+    (
+        block.fontformat.horizontal_scale,
+        block.fontformat.vertical_scale,
+        block.fontformat.slant_angle,
+        block.fontformat.glyph_slant_angle,
+    ) = target
+    return True
+
+
 class MainWindow(mainwindow_cls):
 
     imgtrans_proj: ProjImgTrans = ProjImgTrans()
@@ -658,6 +680,7 @@ class MainWindow(mainwindow_cls):
             self.generate_tif_thumbnails(directory)
             # 重新加载项目，此时应该只加载预览图
             self.imgtrans_proj.load(directory)
+            self.show_text_transform_migration_warnings()
             self.st_manager.clearSceneTextitems()
             self.titleBar.setTitleContent(osp.basename(directory))
             self.updatePageList()
@@ -699,6 +722,7 @@ class MainWindow(mainwindow_cls):
         try:
             self.opening_dir = True
             self.imgtrans_proj.load_from_json(json_path)
+            self.show_text_transform_migration_warnings()
             self.st_manager.clearSceneTextitems()
             self.leftBar.updateRecentProjList(self.imgtrans_proj.proj_path)
             self.updatePageList()
@@ -707,6 +731,18 @@ class MainWindow(mainwindow_cls):
         except Exception as e:
             self.opening_dir = False
             create_error_dialog(e, self.tr('Failed to load project from') + json_path)
+
+    def show_text_transform_migration_warnings(self):
+        migration_warnings = self.imgtrans_proj.text_transform_migration_warnings
+        if not migration_warnings:
+            return
+        QMessageBox.warning(
+            self,
+            self.tr('Project migration warning'),
+            self.tr('Some text transforms were migrated:')
+            + '\n\n'
+            + '\n'.join(migration_warnings),
+        )
         
     def updatePageList(self):
         if self.pageList.count() != 0:
@@ -1156,6 +1192,7 @@ class MainWindow(mainwindow_cls):
             json_path = self.imgtrans_proj.proj_path
             current_img = self.imgtrans_proj.current_img
             self.imgtrans_proj.load_from_json(json_path)
+            self.show_text_transform_migration_warnings()
             if current_img and current_img in self.imgtrans_proj.pages:
                 self.imgtrans_proj.set_current_img(current_img)
                 self.canvas.updateCanvas()
@@ -1240,7 +1277,6 @@ class MainWindow(mainwindow_cls):
 
     def setTextBlockMode(self):
         mode = self.bottomBar.textblockChecker.isChecked()
-        self.canvas.setTextBlockMode(mode)
         pcfg.imgtrans_textblock = mode
         self.st_manager.showTextblkItemRect(mode)
 
@@ -1588,6 +1624,7 @@ class MainWindow(mainwindow_cls):
                     sw = blk.stroke_width
                     if sw > 0 and pcfg.module.enable_ocr and pcfg.module.enable_detect and not override_fnt_size:
                         blk.font_size = blk.font_size / (1 + sw)
+                    _apply_global_text_transforms(blk, gf)
 
             self.st_manager.auto_textlayout_flag = pcfg.let_autolayout_flag and \
                 (pcfg.module.enable_detect or pcfg.module.enable_translate)
