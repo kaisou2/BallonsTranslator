@@ -1,4 +1,4 @@
-from typing import List, Union, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 from qtpy.QtGui import QTextCursor
 from qtpy.QtCore import QPointF
@@ -9,7 +9,11 @@ except:
 
 from .textitem import TextBlkItem, TextBlock
 from .textedit_area import TransTextEdit, SourceTextEdit
-from ballontranslator.utils.fontformat import FontFormat
+from ballontranslator.utils.fontformat import (
+    FontFormat,
+    TextTransform,
+    normalize_text_transform,
+)
 import ballontranslator.utils.config as C
 from .misc import doc_replace, doc_replace_no_shift
 from .texteditshapecontrol import TextBlkShapeControl
@@ -34,6 +38,49 @@ def propagate_user_edit(src_edit: Union[TransTextEdit, TextBlkItem], target_edit
     cursor.insertText(added_text)
     cursor.endEditBlock()
     target_edit.old_undo_steps = target_edit.document().availableUndoSteps()
+
+
+class SetTextTransformCommand(QUndoCommand):
+    """Atomically apply canonical text transforms to one or more items."""
+
+    def __init__(
+        self,
+        items: Sequence[TextBlkItem],
+        before: Sequence[TextTransform],
+        after: Sequence[TextTransform],
+        refresh_callback: Optional[Callable[[], None]] = None,
+    ):
+        super().__init__()
+        self.items = tuple(items)
+        if len(self.items) != len(before) or len(self.items) != len(after):
+            raise ValueError("items, before, and after must have the same length")
+        self.before = tuple(normalize_text_transform(*values) for values in before)
+        self.after = tuple(normalize_text_transform(*values) for values in after)
+        self.refresh_callback = refresh_callback
+
+    @classmethod
+    def create(
+        cls,
+        items: Sequence[TextBlkItem],
+        before: Sequence[TextTransform],
+        after: Sequence[TextTransform],
+        refresh_callback: Optional[Callable[[], None]] = None,
+    ) -> Optional["SetTextTransformCommand"]:
+        """Build a command, or return ``None`` for a normalized no-op."""
+        command = cls(items, before, after, refresh_callback)
+        return None if command.before == command.after else command
+
+    def _apply(self, transforms: Sequence[TextTransform]):
+        for item, transform in zip(self.items, transforms):
+            item.set_text_transform(*transform, preview=False)
+        if self.refresh_callback is not None:
+            self.refresh_callback()
+
+    def redo(self):
+        self._apply(self.after)
+
+    def undo(self):
+        self._apply(self.before)
 
 
 class MoveBlkItemsCommand(QUndoCommand):
