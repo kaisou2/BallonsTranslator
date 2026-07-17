@@ -144,6 +144,7 @@ class TextBlkItem(QGraphicsTextItem):
         self.blk: TextBlock = None
         self.fontformat: FontFormat = None
         self._text_transform_preview: Optional[TextTransform] = None
+        self._glyph_slant_entry_padding: Optional[float] = None
         self._effect_cache_generation = 0
         self._effect_cache_rendered_generation = -1
         self._effect_cache_dirty = False
@@ -724,15 +725,35 @@ class TextBlkItem(QGraphicsTextItem):
             effect_bounds.bottom() - logical_rect.bottom(),
         )
 
-    def _update_effect_padding(self):
-        padding = self._effect_padding()
-        # QTextLayout stores coordinates at 26.6 fixed-point precision. Use the
-        # same grid as the canonical envelope and round outward so repeated
-        # relayout/undo cycles converge without ever undersizing the effects.
-        if padding > 0.0:
-            layout_units = math.nextafter(padding * 64.0, -math.inf)
-            padding = math.ceil(layout_units) / 64.0
-        changed = self.setPadding(padding) if self.padding() != padding else False
+    def _neutral_effect_padding_floor(self) -> float:
+        """Return the grow-only effect padding requested by the BASE path."""
+        if self.layout is None:
+            return 0.0
+        max_font_size = self.layout.max_font_size(to_px=True)
+        padding = 0.0
+        if self.fontformat.shadow_radius > 0:
+            padding = max(padding, max_font_size)
+        if self.fontformat.stroke_width > 0:
+            padding = max(
+                padding,
+                max_font_size * (self.fontformat.stroke_width + 0.05) / 2,
+            )
+        return padding
+
+    def _commit_effect_padding(
+        self,
+        padding: float,
+        *,
+        allow_neutral_shrink: bool = False,
+    ) -> bool:
+        changed = (
+            self.setPadding(
+                padding,
+                allow_neutral_shrink=allow_neutral_shrink,
+            )
+            if self.padding() != padding
+            else False
+        )
         if changed and self.fontformat.gradient_enabled:
             was_repainting = self.repainting
             self.repainting = True
@@ -740,6 +761,47 @@ class TextBlkItem(QGraphicsTextItem):
                 self._refresh_gradient_geometry()
             finally:
                 self.repainting = was_repainting
+        return changed
+
+    def _update_effect_padding(self):
+        if self._glyph_slant_entry_padding is not None:
+            # Preserve the BASE grow-only high-water mark if an effect or font
+            # change raises it while Glyph Slant is active.  The transformed
+            # envelope may later shrink again before the neutral restore.
+            self._glyph_slant_entry_padding = max(
+                self._glyph_slant_entry_padding,
+                self._neutral_effect_padding_floor(),
+            )
+        padding = self._effect_padding()
+        # QTextLayout stores coordinates at 26.6 fixed-point precision. Use the
+        # same grid as the canonical envelope and round outward so repeated
+        # relayout/undo cycles converge without ever undersizing the effects.
+        if padding > 0.0:
+            layout_units = math.nextafter(padding * 64.0, -math.inf)
+            padding = math.ceil(layout_units) / 64.0
+        return self._commit_effect_padding(padding)
+
+    def _restore_neutral_padding_after_glyph_slant(self) -> bool:
+        if (
+            self._glyph_slant_entry_padding is None
+            or not self._text_transform_is_neutral()
+        ):
+            return False
+        padding = max(
+            self._glyph_slant_entry_padding,
+            self._neutral_effect_padding_floor(),
+        )
+        self._glyph_slant_entry_padding = None
+        changed = self._commit_effect_padding(
+            padding,
+            allow_neutral_shrink=True,
+        )
+        # Glyph Slant invalidates the effect pixmap.  Once the item returns to
+        # the BASE neutral paint path, that path no longer rebuilds effects
+        # lazily, so restore an active stroke/shadow cache immediately as well.
+        if any(self._effect_flags()):
+            self.repaint_background()
+            self.update()
         return changed
 
     def _effect_flags(self) -> Tuple[bool, bool]:
@@ -1097,6 +1159,7 @@ class TextBlkItem(QGraphicsTextItem):
             set_char_fmt = True
 
         font_fmt = blk.fontformat
+        self._glyph_slant_entry_padding = None
         if set_format:
             self.set_fontformat(font_fmt, set_char_format=set_char_fmt, set_stroke_width=False, set_effect=False)
 
@@ -1117,6 +1180,14 @@ class TextBlkItem(QGraphicsTextItem):
             self.setGradientEnabled(True)
         self.setShadow(font_fmt, repaint=False)
         self.setStrokeWidth(font_fmt.stroke_width, repaint_background=False)
+        if (
+            self._glyph_slant_entry_padding is None
+            and self.layout.glyph_slant_angle != 0.0
+        ):
+            # Loaded active transforms have no in-session neutral entry point.
+            # Seed the fallback after effects/text are initialized so later
+            # style changes cannot erase the BASE neutral minimum.
+            self._glyph_slant_entry_padding = self._neutral_effect_padding_floor()
         self.setCenterTransform()
         self.repaint_background()
 
@@ -1353,8 +1424,25 @@ class TextBlkItem(QGraphicsTextItem):
         return changed
 
     def _apply_glyph_slant(self, angle: float) -> bool:
-        if self.layout is None or not self.layout.setGlyphSlantAngle(angle):
+        if self.layout is None:
             return False
+        previous_angle = self.layout.glyph_slant_angle
+        if not self.layout.setGlyphSlantAngle(angle):
+            return False
+        if (
+            previous_angle == 0.0
+            and angle != 0.0
+            and self._glyph_slant_entry_padding is None
+        ):
+            self._glyph_slant_entry_padding = self.padding()
+        elif (
+            previous_angle != 0.0
+            and angle == 0.0
+            and self._glyph_slant_entry_padding is None
+        ):
+            # A project can load directly into active Glyph Slant without a
+            # neutral entry snapshot. Restore the same minimum BASE would use.
+            self._glyph_slant_entry_padding = self._neutral_effect_padding_floor()
         self._mark_effect_cache_dirty()
         self._update_effect_padding()
         self.refresh_cache_policy()
@@ -1392,7 +1480,8 @@ class TextBlkItem(QGraphicsTextItem):
             self._text_transform_preview = None if target == canonical else target
             glyph_changed = self._apply_glyph_slant(target.glyph_slant_angle)
             box_changed = self._apply_text_transform(target)
-            return glyph_changed or box_changed
+            padding_changed = self._restore_neutral_padding_after_glyph_slant()
+            return glyph_changed or box_changed or padding_changed
 
         model_changed = raw_canonical != target
         if model_changed:
@@ -1406,7 +1495,8 @@ class TextBlkItem(QGraphicsTextItem):
         self._text_transform_preview = None
         glyph_changed = self._apply_glyph_slant(target.glyph_slant_angle)
         visual_changed = self._apply_text_transform(target)
-        return model_changed or glyph_changed or visual_changed
+        padding_changed = self._restore_neutral_padding_after_glyph_slant()
+        return model_changed or glyph_changed or visual_changed or padding_changed
 
     def clear_text_transform_preview(self) -> bool:
         if self._text_transform_preview is None:
@@ -1415,7 +1505,8 @@ class TextBlkItem(QGraphicsTextItem):
         target = self._canonical_text_transform()
         glyph_changed = self._apply_glyph_slant(target.glyph_slant_angle)
         box_changed = self._apply_text_transform(target)
-        return glyph_changed or box_changed
+        padding_changed = self._restore_neutral_padding_after_glyph_slant()
+        return glyph_changed or box_changed or padding_changed
 
     def setCenterTransform(self) -> bool:
         center = self.logical_unpadded_rect().center()
@@ -1522,10 +1613,10 @@ class TextBlkItem(QGraphicsTextItem):
             return 0.0
         return self.layout.documentMargin()
 
-    def setPadding(self, p: float):
+    def setPadding(self, p: float, *, allow_neutral_shrink: bool = False):
         p = max(0.0, float(p))
         _p = self.padding()
-        if self._text_transform_is_neutral():
+        if self._text_transform_is_neutral() and not allow_neutral_shrink:
             if _p >= p:
                 return False
             absolute_rect = self.absBoundingRect(qrect=True)

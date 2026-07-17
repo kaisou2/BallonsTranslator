@@ -30,6 +30,10 @@ from qtpy.QtGui import (
     QTransform,
 )
 from qtpy.QtWidgets import QApplication, QGraphicsScene
+try:
+    from qtpy.QtWidgets import QUndoStack
+except ImportError:
+    from qtpy.QtGui import QUndoStack
 
 from ballontranslator.utils import shared as C
 
@@ -48,6 +52,7 @@ from ballontranslator.ui.text_glyph_renderer import (
     resolve_paint_spans,
 )
 from ballontranslator.ui.textitem import TextBlkItem
+from ballontranslator.ui.textedit_commands import SetTextTransformCommand
 from ballontranslator.utils.fontformat import FontFormat
 from ballontranslator.utils.textblock import TextBlock
 
@@ -114,6 +119,21 @@ def _make_item(
     return TextBlkItem(block)
 
 
+def _geometry_snapshot(item):
+    return (
+        item.fontformat.text_transform,
+        item.layout.glyph_slant_angle,
+        item.padding(),
+        QRectF(item.boundingRect()),
+        QRectF(item.shape().boundingRect()),
+        QRectF(item.logical_unpadded_rect()),
+        QRectF(item.absBoundingRect(qrect=True)),
+        QPointF(item.pos()),
+        QPointF(item.transformOriginPoint()),
+        QTransform(item.transform()),
+    )
+
+
 def _image_array(image):
     converted = image.convertToFormat(QImage.Format.Format_RGBA8888)
     size = converted.width() * converted.height() * 4
@@ -125,6 +145,23 @@ def _image_array(image):
     return np.frombuffer(raw, dtype=np.uint8).reshape(
         converted.height(), converted.width(), 4
     ).copy()
+
+
+def _effect_pixel_counts(pixels):
+    alpha = pixels[..., 3] > 0
+    red = (
+        (pixels[..., 0] > 150)
+        & (pixels[..., 1] < 80)
+        & (pixels[..., 2] < 80)
+        & alpha
+    )
+    blue = (
+        (pixels[..., 0] < 80)
+        & (pixels[..., 1] < 80)
+        & (pixels[..., 2] > 100)
+        & alpha
+    )
+    return int(red.sum()), int(blue.sum())
 
 
 def _paint_live_layout(item, context=None):
@@ -963,6 +1000,7 @@ class GlyphSlantRenderingTests(unittest.TestCase):
         model_transform = item.fontformat.text_transform
         box_transform = QTransform(item.transform())
         logical_rect = item.absBoundingRect(qrect=True)
+        geometry_snapshot = _geometry_snapshot(item)
         logical_points = (QPointF(5.0, 10.0), QPointF(80.0, 30.0))
         hits = tuple(
             item.layout.hitTest(
@@ -987,6 +1025,7 @@ class GlyphSlantRenderingTests(unittest.TestCase):
         )
         self.assertEqual(item.fontformat.text_transform, model_transform)
         self.assertEqual(item.layout.glyph_slant_angle, 27.0)
+        self.assertGreater(item.padding(), geometry_snapshot[2])
         self.assertEqual(item.transform(), box_transform)
         self.assertEqual(item.absBoundingRect(qrect=True), logical_rect)
         self.assertEqual(item.shape().boundingRect(), item.logical_unpadded_rect())
@@ -1020,6 +1059,201 @@ class GlyphSlantRenderingTests(unittest.TestCase):
         self.assertEqual(item.fontformat.text_transform, model_transform)
         self.assertEqual(item.transform(), box_transform)
         self.assertEqual(item.absBoundingRect(qrect=True), logical_rect)
+        self.assertEqual(_geometry_snapshot(item), geometry_snapshot)
+
+    def test_commit_zero_and_undo_restore_neutral_padding_and_hit_shape(self):
+        for transition in ('commit-zero', 'undo'):
+            with self.subTest(transition=transition):
+                item = _make_item(text='fi ffi e\u0301 漢字')
+                before = _geometry_snapshot(item)
+
+                if transition == 'commit-zero':
+                    self.assertTrue(
+                        item.set_text_transform(glyph_slant_angle=45.0)
+                    )
+                    active_padding = item.padding()
+                    self.assertTrue(
+                        item.set_text_transform(glyph_slant_angle=0.0)
+                    )
+                else:
+                    stack = QUndoStack()
+                    stack.push(
+                        SetTextTransformCommand(
+                            [item],
+                            [(1.0, 1.0, 0.0, 0.0)],
+                            [(1.0, 1.0, 0.0, 45.0)],
+                        )
+                    )
+                    active_padding = item.padding()
+                    stack.undo()
+
+                self.assertGreater(active_padding, before[2])
+                self.assertEqual(
+                    item.fontformat.text_transform,
+                    (1.0, 1.0, 0.0, 0.0),
+                )
+                self.assertEqual(item.layout.glyph_slant_angle, 0.0)
+                self.assertEqual(_geometry_snapshot(item), before)
+
+    def test_neutral_restore_preserves_base_effect_and_existing_padding(self):
+        effect_cases = (
+            {'stroke_width': 0.2},
+            {'shadow_radius': 0.25, 'shadow_strength': 0.9},
+            {
+                'stroke_width': 0.2,
+                'shadow_radius': 0.25,
+                'shadow_strength': 0.9,
+            },
+        )
+        for effect_kwargs in effect_cases:
+            for transition in ('preview-clear', 'commit-zero', 'undo'):
+                with self.subTest(
+                    effect_kwargs=effect_kwargs,
+                    transition=transition,
+                ):
+                    item = _make_item(text='TEST', **effect_kwargs)
+                    before = _geometry_snapshot(item)
+                    before_pixels = _render_scene(item)
+                    before_red, before_blue = _effect_pixel_counts(before_pixels)
+                    self.assertIsNotNone(item.background_pixmap)
+
+                    if transition == 'preview-clear':
+                        self.assertTrue(
+                            item.set_text_transform(
+                                glyph_slant_angle=45.0,
+                                preview=True,
+                            )
+                        )
+                        self.assertTrue(item.clear_text_transform_preview())
+                    elif transition == 'commit-zero':
+                        self.assertTrue(
+                            item.set_text_transform(glyph_slant_angle=45.0)
+                        )
+                        self.assertTrue(
+                            item.set_text_transform(glyph_slant_angle=0.0)
+                        )
+                    else:
+                        stack = QUndoStack()
+                        stack.push(
+                            SetTextTransformCommand(
+                                [item],
+                                [(1.0, 1.0, 0.0, 0.0)],
+                                [(1.0, 1.0, 0.0, 45.0)],
+                            )
+                        )
+                        stack.undo()
+
+                    self.assertEqual(_geometry_snapshot(item), before)
+                    self.assertIsNotNone(item.background_pixmap)
+                    after_red, after_blue = _effect_pixel_counts(
+                        _render_scene(item)
+                    )
+                    if effect_kwargs.get('stroke_width', 0.0) > 0.0:
+                        self.assertGreater(before_red, 50)
+                        self.assertLessEqual(
+                            abs(after_red - before_red),
+                            max(4, math.ceil(before_red * 0.01)),
+                        )
+                    if (
+                        effect_kwargs.get('shadow_radius', 0.0) > 0.0
+                        and effect_kwargs.get('shadow_strength', 0.0) > 0.0
+                    ):
+                        self.assertGreater(before_blue, 50)
+                        self.assertLessEqual(
+                            abs(after_blue - before_blue),
+                            max(4, math.ceil(before_blue * 0.01)),
+                        )
+
+        item = _make_item(text='TEST')
+        self.assertTrue(item.setPadding(80.0))
+        before = _geometry_snapshot(item)
+        self.assertTrue(
+            item.set_text_transform(glyph_slant_angle=45.0, preview=True)
+        )
+        self.assertNotEqual(item.padding(), before[2])
+        self.assertTrue(item.clear_text_transform_preview())
+        self.assertEqual(_geometry_snapshot(item), before)
+
+        neutral = _make_item(text='TEST')
+        neutral.setStrokeWidth(0.5)
+        neutral.setStrokeWidth(0.0)
+        expected = _geometry_snapshot(neutral)
+
+        item = _make_item(text='TEST')
+        self.assertTrue(item.set_text_transform(glyph_slant_angle=45.0))
+        item.setStrokeWidth(0.5)
+        item.setStrokeWidth(0.0)
+        self.assertTrue(item.set_text_transform(glyph_slant_angle=0.0))
+        self.assertEqual(_geometry_snapshot(item), expected)
+
+    def test_loaded_and_staggered_transforms_restore_neutral_padding(self):
+        for effect_kwargs in (
+            {},
+            {
+                'stroke_width': 0.2,
+                'shadow_radius': 0.25,
+                'shadow_strength': 0.9,
+            },
+        ):
+            with self.subTest(loaded_effects=effect_kwargs):
+                neutral = _make_item(text='TEST', **effect_kwargs)
+                item = _make_item(
+                    text='TEST',
+                    glyph_slant=45.0,
+                    **effect_kwargs,
+                )
+                self.assertTrue(
+                    item.set_text_transform(glyph_slant_angle=0.0)
+                )
+                self.assertEqual(
+                    _geometry_snapshot(item),
+                    _geometry_snapshot(neutral),
+                )
+
+        for effect_kwargs, clear_effect in (
+            (
+                {'stroke_width': 0.5},
+                lambda target: target.setStrokeWidth(0.0),
+            ),
+            (
+                {'shadow_radius': 0.25, 'shadow_strength': 0.0},
+                lambda target: target.setBGAttribute(
+                    'shadow_radius', 0.0, repaint=False
+                ),
+            ),
+        ):
+            with self.subTest(loaded_then_clear_effect=effect_kwargs):
+                neutral = _make_item(text='TEST', **effect_kwargs)
+                clear_effect(neutral)
+                item = _make_item(
+                    text='TEST',
+                    glyph_slant=45.0,
+                    **effect_kwargs,
+                )
+                clear_effect(item)
+                self.assertTrue(
+                    item.set_text_transform(glyph_slant_angle=0.0)
+                )
+                self.assertEqual(
+                    _geometry_snapshot(item),
+                    _geometry_snapshot(neutral),
+                )
+
+        item = _make_item(text='fi ffi e\u0301 漢字')
+        before = _geometry_snapshot(item)
+        self.assertTrue(
+            item.set_text_transform(
+                horizontal_scale=1.5,
+                glyph_slant_angle=45.0,
+            )
+        )
+        self.assertTrue(item.set_text_transform(glyph_slant_angle=0.0))
+        self.assertEqual(
+            item.fontformat.text_transform,
+            (1.5, 1.0, 0.0, 0.0),
+        )
+        self.assertTrue(item.set_text_transform(horizontal_scale=1.0))
+        self.assertEqual(_geometry_snapshot(item), before)
 
     def test_ligature_combining_cjk_and_native_italic_keep_layout(self):
         item = _make_item(
