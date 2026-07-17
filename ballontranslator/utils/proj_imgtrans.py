@@ -1,3 +1,5 @@
+import copy
+import math
 import os, json, shutil, re, docx, docx2txt, piexif, cv2
 from docx.shared import Inches
 from docx import Document
@@ -10,6 +12,16 @@ from PIL import Image
 from .logger import logger as LOGGER
 from .io_utils import find_all_imgs, imread, imwrite, NumpyEncoder
 from .textblock import TextBlock, FontFormat
+from .fontformat import (
+    TEXT_TRANSFORM_BOX_SLANT_MAX,
+    TEXT_TRANSFORM_BOX_SLANT_MIN,
+    TEXT_TRANSFORM_GLYPH_SLANT_MAX,
+    TEXT_TRANSFORM_GLYPH_SLANT_MIN,
+    TEXT_TRANSFORM_SCALE_MAX,
+    TEXT_TRANSFORM_SCALE_MIN,
+    TextTransform,
+    normalize_text_transform,
+)
 from .config import pcfg, RunStatus
 from . import shared
 
@@ -24,6 +36,201 @@ class ProjectNotSupportedException(Exception):
 
 class ImgnameNotInProjectException(Exception):
     pass
+
+
+TEXT_TRANSFORM_SCHEMA_VERSION = 2
+_MISSING = object()
+_CANONICAL_TRANSFORM_FIELDS = (
+    'horizontal_scale',
+    'vertical_scale',
+    'slant_angle',
+    'glyph_slant_angle',
+)
+_TRANSFORM_BOUNDS = {
+    'horizontal_scale': (TEXT_TRANSFORM_SCALE_MIN, TEXT_TRANSFORM_SCALE_MAX),
+    'vertical_scale': (TEXT_TRANSFORM_SCALE_MIN, TEXT_TRANSFORM_SCALE_MAX),
+    'slant_angle': (TEXT_TRANSFORM_BOX_SLANT_MIN, TEXT_TRANSFORM_BOX_SLANT_MAX),
+    'glyph_slant_angle': (
+        TEXT_TRANSFORM_GLYPH_SLANT_MIN,
+        TEXT_TRANSFORM_GLYPH_SLANT_MAX,
+    ),
+}
+_INTERMEDIATE_TRANSFORM_FIELDS = (
+    *_CANONICAL_TRANSFORM_FIELDS,
+    'italic_angle',
+    'rich_text_transform_version',
+)
+_INTERMEDIATE_STRETCH_MARKER = 'ballontranslator-logical-stretch-v1:'
+
+
+class TextTransformPayloadError(ValueError):
+    """Base class for project text-transform payload failures."""
+
+
+class UnsupportedTextTransformVersionError(TextTransformPayloadError):
+    pass
+
+
+class InvalidTextTransformPayloadError(TextTransformPayloadError):
+    pass
+
+
+def _payload_version(value, location: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InvalidTextTransformPayloadError(
+            f"{location} must be an integer schema version"
+        )
+    value = float(value)
+    if not math.isfinite(value) or not value.is_integer() or value < 0:
+        raise InvalidTextTransformPayloadError(
+            f"{location} must be an integer schema version"
+        )
+    return int(value)
+
+
+def _payload_number(value, location: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InvalidTextTransformPayloadError(
+            f"{location} must be a finite number"
+        )
+    value = float(value)
+    if not math.isfinite(value):
+        raise InvalidTextTransformPayloadError(
+            f"{location} must be a finite number"
+        )
+    return value
+
+
+def _canonical_v2_block_transform(
+    block: dict,
+    location: str,
+) -> Tuple[TextTransform, dict]:
+    if 'fontformat' not in block or not isinstance(block['fontformat'], dict):
+        raise InvalidTextTransformPayloadError(
+            f"{location}.fontformat must be an object in schema v2"
+        )
+    fontformat = block['fontformat']
+
+    forbidden_block_fields = _INTERMEDIATE_TRANSFORM_FIELDS
+    for field_name in forbidden_block_fields:
+        if field_name in block:
+            raise InvalidTextTransformPayloadError(
+                f"{location}.{field_name} is not canonical in schema v2"
+            )
+    for field_name in ('italic_angle', 'rich_text_transform_version'):
+        if field_name in fontformat:
+            raise InvalidTextTransformPayloadError(
+                f"{location}.fontformat.{field_name} is not canonical in schema v2"
+            )
+    rich_text = block.get('rich_text')
+    if isinstance(rich_text, str) and _INTERMEDIATE_STRETCH_MARKER in rich_text:
+        raise InvalidTextTransformPayloadError(
+            f"{location}.rich_text contains unsupported intermediate transform metadata"
+        )
+
+    raw = {}
+    for field_name in _CANONICAL_TRANSFORM_FIELDS:
+        if field_name not in fontformat:
+            raise InvalidTextTransformPayloadError(
+                f"{location}.fontformat.{field_name} is required in schema v2"
+            )
+        value = _payload_number(
+            fontformat[field_name], f"{location}.fontformat.{field_name}"
+        )
+        minimum, maximum = _TRANSFORM_BOUNDS[field_name]
+        if value < minimum or value > maximum:
+            raise InvalidTextTransformPayloadError(
+                f"{location}.fontformat.{field_name} is outside "
+                f"the canonical range [{minimum}, {maximum}]"
+            )
+        raw[field_name] = value
+
+    return (
+        normalize_text_transform(
+            raw['horizontal_scale'],
+            raw['vertical_scale'],
+            raw['slant_angle'],
+            raw['glyph_slant_angle'],
+        ),
+        fontformat,
+    )
+
+
+def _official_legacy_fontformat(block: dict, location: str) -> dict:
+    """Validate one upstream block and return its format for neutral migration."""
+    fontformat = block.get('fontformat', {})
+    if fontformat is None:
+        fontformat = {}
+    if not isinstance(fontformat, dict):
+        raise InvalidTextTransformPayloadError(f"{location}.fontformat must be an object")
+
+    for field_name in _INTERMEDIATE_TRANSFORM_FIELDS:
+        if field_name in block or field_name in fontformat:
+            raise InvalidTextTransformPayloadError(
+                f"{location} contains unsupported intermediate transform field "
+                f"{field_name}"
+            )
+    rich_text = block.get('rich_text')
+    if isinstance(rich_text, str) and _INTERMEDIATE_STRETCH_MARKER in rich_text:
+        raise InvalidTextTransformPayloadError(
+            f"{location}.rich_text contains unsupported intermediate transform metadata"
+        )
+    return fontformat
+
+
+def migrate_text_transform_payload(proj_dict: dict):
+    """Return a canonical schema-v2 copy without mutating the input payload.
+
+    Projects written by official upstream releases do not have a transform
+    schema marker and migrate to the neutral transform. Only that upstream
+    shape and this branch's canonical v2 shape are accepted; unmerged
+    intermediate v0/v1 payloads are deliberately rejected.
+    """
+    if not isinstance(proj_dict, dict):
+        raise InvalidTextTransformPayloadError("project payload must be an object")
+
+    migrated = copy.deepcopy(proj_dict)
+    version_value = migrated.get('text_transform_schema_version', _MISSING)
+    if version_value is _MISSING:
+        root_version = None
+    else:
+        root_version = _payload_version(
+            version_value,
+            'text_transform_schema_version',
+        )
+        if root_version != TEXT_TRANSFORM_SCHEMA_VERSION:
+            raise UnsupportedTextTransformVersionError(
+                f"unsupported text transform schema version {root_version}"
+            )
+
+    pages = migrated.get('pages')
+    if not isinstance(pages, dict):
+        raise InvalidTextTransformPayloadError("pages must be an object")
+
+    # Validate the entire detached payload before canonicalizing any block.
+    # This keeps direct migration and ProjImgTrans.load_from_dict transactional.
+    validated_blocks = []
+    for page_name, blocks in pages.items():
+        if not isinstance(blocks, list):
+            raise InvalidTextTransformPayloadError(f"pages.{page_name} must be a list")
+        for index, block in enumerate(blocks):
+            location = f"pages.{page_name}[{index}]"
+            if not isinstance(block, dict):
+                raise InvalidTextTransformPayloadError(f"{location} must be an object")
+            if root_version is None:
+                fontformat = _official_legacy_fontformat(block, location)
+                transform = TextTransform(1.0, 1.0, 0.0, 0.0)
+            else:
+                transform, fontformat = _canonical_v2_block_transform(block, location)
+            validated_blocks.append((block, fontformat, transform))
+
+    for block, fontformat, transform in validated_blocks:
+        canonical_fontformat = dict(fontformat)
+        canonical_fontformat.update(zip(_CANONICAL_TRANSFORM_FIELDS, transform))
+        block['fontformat'] = canonical_fontformat
+
+    migrated['text_transform_schema_version'] = TEXT_TRANSFORM_SCHEMA_VERSION
+    return migrated, []
 
 
 def get_last_modified_file(file_prefix, exts, ext_fallback=None):
@@ -119,6 +326,7 @@ class ProjImgTrans:
         self.img_array: np.ndarray = None
         self.mask_array: np.ndarray = None
         self.inpainted_array: np.ndarray = None
+        self.text_transform_migration_warnings: List[str] = []
         if directory is not None:
             self.load(directory)
 
@@ -134,28 +342,61 @@ class ProjImgTrans:
         return self.type+'_'+osp.basename(self.directory)
 
     def load(self, directory: str, json_path: str = None) -> bool:
-        self.directory = directory
+        target_directory = directory
         if json_path is None:
-            self.proj_path = osp.join(self.directory, self.proj_name() + '.json')
+            target_proj_path = osp.join(
+                target_directory,
+                self.type + '_' + osp.basename(target_directory) + '.json',
+            )
         else:
-            self.proj_path = json_path
+            target_proj_path = json_path
         new_proj = False
-        if not osp.exists(self.proj_path):
+        candidate = ProjImgTrans()
+        if not osp.exists(target_proj_path):
             new_proj = True
-            self.new_project()
+            candidate.directory = target_directory
+            candidate.proj_path = target_proj_path
+            candidate.new_project()
         else:
             try:
-                with open(self.proj_path, 'r', encoding='utf8') as f:
+                with open(target_proj_path, 'r', encoding='utf8') as f:
                     proj_dict = json.loads(f.read())
             except Exception as e:
-                raise ProjectLoadFailureException(e)
-            self.load_from_dict(proj_dict)
-        if not osp.exists(self.inpainted_dir()):
-            os.makedirs(self.inpainted_dir())
-        if not osp.exists(self.mask_dir()):
-            os.makedirs(self.mask_dir())
+                raise ProjectLoadFailureException(str(e)) from e
+            candidate.load_from_dict(
+                proj_dict,
+                directory=target_directory,
+                proj_path=target_proj_path,
+            )
+        target_inpainted_dir = osp.join(target_directory, 'inpainted')
+        target_mask_dir = osp.join(target_directory, 'mask')
+        if not osp.exists(target_inpainted_dir):
+            os.makedirs(target_inpainted_dir)
+        if not osp.exists(target_mask_dir):
+            os.makedirs(target_mask_dir)
+
+        self._adopt_project_state(candidate)
 
         return new_proj
+
+    def _adopt_project_state(self, candidate: 'ProjImgTrans') -> None:
+        """Commit one fully constructed project state to this instance."""
+        self.directory = candidate.directory
+        self.proj_path = candidate.proj_path
+        self.pages = candidate.pages
+        self._pagename2idx = candidate._pagename2idx
+        self._idx2pagename = candidate._idx2pagename
+        self.not_found_pages = candidate.not_found_pages
+        self.new_pages = candidate.new_pages
+        self._image_info = candidate._image_info
+        self.current_img = candidate.current_img
+        self.img_array = candidate.img_array
+        self.mask_array = candidate.mask_array
+        self.inpainted_array = candidate.inpainted_array
+        self._fuzzy_inpainted_list = candidate._fuzzy_inpainted_list
+        self.text_transform_migration_warnings = (
+            candidate.text_transform_migration_warnings
+        )
 
     def mask_dir(self):
         return osp.join(self.directory, 'mask')
@@ -166,61 +407,82 @@ class ProjImgTrans:
     def result_dir(self):
         return osp.join(self.directory, 'result')
 
-    def load_from_dict(self, proj_dict: dict):
-        self.set_current_img(None)
+    def load_from_dict(
+        self,
+        proj_dict: dict,
+        *,
+        directory: str = None,
+        proj_path: str = None,
+    ):
+        migrated, migration_warnings = migrate_text_transform_payload(proj_dict)
+        page_dict = migrated['pages']
+        load_directory = self.directory if directory is None else directory
+        load_proj_path = self.proj_path if proj_path is None else proj_path
+
         try:
-            self.pages = {}
-            self._pagename2idx = {}
-            self._idx2pagename = {}
-            self.not_found_pages = {}
-            page_dict = proj_dict['pages']
-            not_found_pages = list(page_dict.keys())
-            found_pages = find_all_imgs(img_dir=self.directory, abs_path=False, sort=True)
-            for ii, imname in enumerate(found_pages):
-                if imname in page_dict:
-                    self.pages[imname] = [TextBlock(**blk_dict) for blk_dict in page_dict[imname]]
-                    not_found_pages.remove(imname)
+            found_pages = find_all_imgs(
+                img_dir=load_directory, abs_path=False, sort=True
+            )
+            pages = {}
+            pagename_to_idx = {}
+            idx_to_pagename = {}
+            not_found_pages = {}
+            new_pages = []
+            missing_names = list(page_dict.keys())
+            for index, image_name in enumerate(found_pages):
+                if image_name in page_dict:
+                    pages[image_name] = [
+                        TextBlock(**block) for block in page_dict[image_name]
+                    ]
+                    missing_names.remove(image_name)
                 else:
-                    self.pages[imname] = []
-                    self.new_pages.append(imname)
-                self._pagename2idx[imname] = ii
-                self._idx2pagename[ii] = imname
-            for imname in not_found_pages:
-                self.not_found_pages[imname] = [TextBlock(**blk_dict) for blk_dict in page_dict[imname]]
-        except Exception as e:
-            raise ProjectNotSupportedException(e)
-        
-        if 'image_info' in proj_dict:
-            self._image_info = proj_dict['image_info']
-        else:
-            self._image_info = {}
+                    pages[image_name] = []
+                    new_pages.append(image_name)
+                pagename_to_idx[image_name] = index
+                idx_to_pagename[index] = image_name
+            for image_name in missing_names:
+                not_found_pages[image_name] = [
+                    TextBlock(**block) for block in page_dict[image_name]
+                ]
+        except (KeyError, TypeError, ValueError) as error:
+            raise ProjectNotSupportedException(str(error)) from error
 
-        for p in self.pages:
-            if p not in self._image_info:
-                self._image_info[p] = {}
-            img_info = self._image_info[p]
-            if 'finish_code' not in img_info:
-                page_blklist = self.pages[p]
-                has_empty_blk = len(page_blklist) == 0 or \
-                    any(not blk.text or len(blk.text) == 0 for blk in page_blklist)
-                if has_empty_blk:
-                    img_info['finish_code'] = 0
-                else:
-                    img_info['finish_code'] = RunStatus.FIN_ALL
-            
-        set_img_failed = False
-        if 'current_img' in proj_dict:
-            current_img = proj_dict['current_img']
-            try:
-                self.set_current_img(current_img)
-            except ImgnameNotInProjectException:
-                set_img_failed = True
-        else:
-            set_img_failed = True
+        image_info = copy.deepcopy(migrated.get('image_info', {}))
+        if not isinstance(image_info, dict):
+            raise ProjectNotSupportedException("image_info must be an object")
+        for page_name, page_blocks in pages.items():
+            if page_name not in image_info:
+                image_info[page_name] = {}
+            if not isinstance(image_info[page_name], dict):
+                raise ProjectNotSupportedException(
+                    f"image_info.{page_name} must be an object"
+                )
+            if 'finish_code' not in image_info[page_name]:
+                has_empty_block = len(page_blocks) == 0 or any(
+                    not block.text or len(block.text) == 0 for block in page_blocks
+                )
+                image_info[page_name]['finish_code'] = (
+                    0 if has_empty_block else RunStatus.FIN_ALL
+                )
 
-        if set_img_failed:
-            if len(self.pages) > 0:
-                self.set_current_img_byidx(0)
+        # Image IO is also performed on an isolated candidate. A failed current
+        # image never leaves the existing project half replaced.
+        candidate = ProjImgTrans()
+        candidate.directory = load_directory
+        candidate.proj_path = load_proj_path
+        candidate.pages = pages
+        candidate._pagename2idx = pagename_to_idx
+        candidate._idx2pagename = idx_to_pagename
+        candidate.not_found_pages = not_found_pages
+        candidate.new_pages = new_pages
+        candidate._image_info = image_info
+        current_image = migrated.get('current_img')
+        if current_image not in pages:
+            current_image = idx_to_pagename.get(0)
+        candidate.set_current_img(current_image)
+
+        candidate.text_transform_migration_warnings = migration_warnings
+        self._adopt_project_state(candidate)
 
     def get_page_progress(self, pagename: str):
         fin_code = self._image_info[pagename]['finish_code']
@@ -267,13 +529,11 @@ class ProjImgTrans:
         return all_matched, {'missing_pages': missing_pages, 'unmatched_pages': unmatched_pages, 'unexpected_pages': unexpected_pages, 'matched_pages': matched_pages}
 
     def load_from_json(self, json_path: str):
-        old_dir = self.directory
         directory = osp.dirname(json_path)
         try:
             self.load(directory, json_path=json_path)
         except Exception as e:
-            self.load(old_dir)
-            raise ProjectLoadFailureException(e)
+            raise ProjectLoadFailureException(str(e)) from e
 
     def set_current_img(self, imgname: str):
         if imgname is not None:
@@ -360,6 +620,7 @@ class ProjImgTrans:
         pages.update(self.not_found_pages)        
         image_info = self._image_info.copy()
         return {
+            'text_transform_schema_version': TEXT_TRANSFORM_SCHEMA_VERSION,
             'directory': self.directory,
             'pages': pages,
             'current_img': self.current_img,
