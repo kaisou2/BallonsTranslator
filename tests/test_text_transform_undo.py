@@ -293,6 +293,35 @@ class ApplyFontformatCommandTest(unittest.TestCase):
         stack.redo()
         self.assertEqual(item.fontformat.text_transform, target.text_transform)
 
+    def test_redo_uses_creation_snapshot_after_source_format_changes(self):
+        _scene, item = self.make_item(transform=(1.0, 1.0, 0.0, 0.0))
+        target = item.fontformat.deepcopy()
+        target.horizontal_scale = 1.5
+        target.vertical_scale = 0.8
+        target.slant_angle = 10.0
+        target.glyph_slant_angle = 12.0
+        expected = target.text_transform
+        stack = QUndoStack()
+        command = ApplyFontformatCommand([item], [FakeTransEdit()], target)
+
+        stack.push(command)
+        self.assertIsNot(command.new_fmt, target)
+        self.assertEqual(item.blk.fontformat.text_transform, expected)
+        (
+            target.horizontal_scale,
+            target.vertical_scale,
+            target.slant_angle,
+            target.glyph_slant_angle,
+        ) = (2.0, 1.2, -20.0, -25.0)
+
+        stack.undo()
+        self.assertEqual(
+            item.blk.fontformat.text_transform,
+            (1.0, 1.0, 0.0, 0.0),
+        )
+        stack.redo()
+        self.assertEqual(item.blk.fontformat.text_transform, expected)
+
     def test_overlay_callback_runs_once_per_apply_undo_redo(self):
         _scene, item = self.make_item()
         refreshes = []

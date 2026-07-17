@@ -164,6 +164,18 @@ def _effect_pixel_counts(pixels):
     return int(red.sum()), int(blue.sum())
 
 
+def _layout_property_range_count(item, property_id):
+    count = 0
+    block = item.document().firstBlock()
+    while block.isValid():
+        count += sum(
+            bool(format_range.format.property(property_id))
+            for format_range in block.layout().formats()
+        )
+        block = block.next()
+    return count
+
+
 def _paint_live_layout(item, context=None):
     rect = item.boundingRect()
     image = QImage(
@@ -1124,13 +1136,9 @@ class GlyphSlantRenderingTests(unittest.TestCase):
                                 preview=True,
                             )
                         )
-                        self.assertTrue(item.clear_text_transform_preview())
                     elif transition == 'commit-zero':
                         self.assertTrue(
                             item.set_text_transform(glyph_slant_angle=45.0)
-                        )
-                        self.assertTrue(
-                            item.set_text_transform(glyph_slant_angle=0.0)
                         )
                     else:
                         stack = QUndoStack()
@@ -1141,10 +1149,25 @@ class GlyphSlantRenderingTests(unittest.TestCase):
                                 [(1.0, 1.0, 0.0, 45.0)],
                             )
                         )
+
+                    _render_scene(item)
+                    self.assertIsNotNone(item.background_pixmap)
+                    active_cache_key = item.background_pixmap.cacheKey()
+                    if transition == 'preview-clear':
+                        self.assertTrue(item.clear_text_transform_preview())
+                    elif transition == 'commit-zero':
+                        self.assertTrue(
+                            item.set_text_transform(glyph_slant_angle=0.0)
+                        )
+                    else:
                         stack.undo()
 
                     self.assertEqual(_geometry_snapshot(item), before)
                     self.assertIsNotNone(item.background_pixmap)
+                    self.assertNotEqual(
+                        item.background_pixmap.cacheKey(),
+                        active_cache_key,
+                    )
                     after_red, after_blue = _effect_pixel_counts(
                         _render_scene(item)
                     )
@@ -1185,6 +1208,100 @@ class GlyphSlantRenderingTests(unittest.TestCase):
         item.setStrokeWidth(0.0)
         self.assertTrue(item.set_text_transform(glyph_slant_angle=0.0))
         self.assertEqual(_geometry_snapshot(item), expected)
+
+    def test_gradient_layout_state_is_removed_on_neutral_restore(self):
+        gradient_property = textitem_module.GRADIENT_LAYOUT_FORMAT_PROPERTY
+        unrelated_property = gradient_property + 1
+        for transition in ('preview-clear', 'commit-zero', 'undo'):
+            with self.subTest(transition=transition):
+                item = _make_item(text='GRADIENT TEST', gradient=True)
+                block_layout = item.document().firstBlock().layout()
+                unrelated_format = QTextCharFormat()
+                unrelated_format.setProperty(unrelated_property, True)
+                unrelated_range = QTextLayout.FormatRange()
+                unrelated_range.start = 0
+                unrelated_range.length = 1
+                unrelated_range.format = unrelated_format
+                block_layout.setFormats(
+                    list(block_layout.formats()) + [unrelated_range]
+                )
+                item.layout.reLayout()
+
+                before = _geometry_snapshot(item)
+                before_html = item.toHtml()
+                before_pixels = _render_scene(item)
+                item.set_export_effect_render(True)
+                try:
+                    before_export_pixels = _render_scene(item)
+                finally:
+                    item.set_export_effect_render(False)
+                self.assertEqual(
+                    _layout_property_range_count(item, gradient_property),
+                    0,
+                )
+                self.assertEqual(
+                    _layout_property_range_count(item, unrelated_property),
+                    1,
+                )
+
+                if transition == 'preview-clear':
+                    self.assertTrue(
+                        item.set_text_transform(
+                            glyph_slant_angle=45.0,
+                            preview=True,
+                        )
+                    )
+                elif transition == 'commit-zero':
+                    self.assertTrue(
+                        item.set_text_transform(glyph_slant_angle=45.0)
+                    )
+                else:
+                    stack = QUndoStack()
+                    stack.push(
+                        SetTextTransformCommand(
+                            [item],
+                            [(1.0, 1.0, 0.0, 0.0)],
+                            [(1.0, 1.0, 0.0, 45.0)],
+                        )
+                    )
+                _render_scene(item)
+                self.assertGreater(
+                    _layout_property_range_count(item, gradient_property),
+                    0,
+                )
+
+                if transition == 'preview-clear':
+                    self.assertTrue(item.clear_text_transform_preview())
+                elif transition == 'commit-zero':
+                    self.assertTrue(
+                        item.set_text_transform(glyph_slant_angle=0.0)
+                    )
+                else:
+                    stack.undo()
+
+                self.assertEqual(_geometry_snapshot(item), before)
+                self.assertEqual(item.toHtml(), before_html)
+                self.assertEqual(
+                    _layout_property_range_count(item, gradient_property),
+                    0,
+                )
+                self.assertEqual(
+                    _layout_property_range_count(item, unrelated_property),
+                    1,
+                )
+                np.testing.assert_array_equal(
+                    _render_scene(item),
+                    before_pixels,
+                )
+                item.set_export_effect_render(True)
+                try:
+                    after_export_pixels = _render_scene(item)
+                finally:
+                    item.set_export_effect_render(False)
+                np.testing.assert_array_equal(
+                    after_export_pixels,
+                    before_export_pixels,
+                )
 
     def test_loaded_and_staggered_transforms_restore_neutral_padding(self):
         for effect_kwargs in (

@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -235,13 +236,28 @@ class CommittedTransformControlTest(unittest.TestCase):
 
 class TextAdvancedFormatPanelTransformTest(unittest.TestCase):
     def make_panel(self):
-        app_shared.register_view_widget = lambda *_args, **_kwargs: None
-        return TextAdvancedFormatPanel(
-            'Advanced Text Format',
-            config_name='text_transform_test_panel',
-            config_expand_name='text_transform_test_expand',
-            on_format_changed=lambda *_args: None,
-        )
+        with mock.patch.object(
+            app_shared,
+            'register_view_widget',
+            lambda *_args, **_kwargs: None,
+            create=True,
+        ):
+            panel = TextAdvancedFormatPanel(
+                'Advanced Text Format',
+                config_name='text_transform_test_panel',
+                config_expand_name='text_transform_test_expand',
+                on_format_changed=lambda *_args: None,
+            )
+
+        def cleanup_panel():
+            panel.view_widget.close()
+            panel.close()
+            panel.view_widget.deleteLater()
+            panel.deleteLater()
+            _APP.processEvents()
+
+        self.addCleanup(cleanup_panel)
+        return panel
 
     def test_mixed_selection_and_precise_refresh_are_model_views_only(self):
         panel = self.make_panel()

@@ -462,13 +462,21 @@ print(json.dumps({
     'rich_text': block.rich_text,
 }))
 """
-            child = subprocess.run(
-                [sys.executable, '-c', child_code, directory],
-                cwd=os.path.dirname(os.path.dirname(__file__)),
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            try:
+                child = subprocess.run(
+                    [sys.executable, '-c', child_code, directory],
+                    cwd=os.path.dirname(os.path.dirname(__file__)),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except subprocess.TimeoutExpired as error:
+                self.fail(
+                    'save/reload child process timed out after '
+                    f'{error.timeout}s; stdout={error.stdout!r}; '
+                    f'stderr={error.stderr!r}'
+                )
             child_result = json.loads(child.stdout.strip().splitlines()[-1])
             self.assertEqual(
                 child_result['transform'],

@@ -2345,6 +2345,15 @@ class TextBlkItem(QGraphicsTextItem):
         fontformat.gradient_end_color = self.fontformat.gradient_end_color
         fontformat.gradient_angle = self.fontformat.gradient_angle
         fontformat.gradient_size = self.fontformat.gradient_size
+        # Selection changes can detach the render/UI format cache from the
+        # persistent TextBlock owner.  The canonical quartet must always win
+        # when producing a save/undo format snapshot.
+        (
+            fontformat.horizontal_scale,
+            fontformat.vertical_scale,
+            fontformat.slant_angle,
+            fontformat.glyph_slant_angle,
+        ) = self.blk.fontformat.text_transform
         return fontformat
 
     def set_fontformat(self, ffmat: FontFormat, set_char_format=False, set_stroke_width=True, set_effect=True):
@@ -2567,38 +2576,64 @@ class TextBlkItem(QGraphicsTextItem):
 
     def _refresh_gradient_geometry(self):
         """Refresh the block-local gradient as non-document layout state."""
-        if self._text_transform_is_neutral() or self._refreshing_gradient_geometry:
+        if self._refreshing_gradient_geometry:
             return
-        self._refreshing_gradient_geometry = True
-        gradient_format = QTextCharFormat()
-        gradient_format.setForeground(self.get_text_gradient())
-        gradient_format.setProperty(GRADIENT_LAYOUT_FORMAT_PROPERTY, True)
-        try:
+        neutral = self._text_transform_is_neutral()
+        if neutral:
             block = self.document().firstBlock()
-            while block.isValid():
-                layout = block.layout()
-                ranges = [
-                    format_range
-                    for format_range in layout.formats()
-                    if not bool(
+            has_transient_range = False
+            while block.isValid() and not has_transient_range:
+                has_transient_range = any(
+                    bool(
                         format_range.format.property(
                             GRADIENT_LAYOUT_FORMAT_PROPERTY
                         )
                     )
-                ]
+                    for format_range in block.layout().formats()
+                )
+                block = block.next()
+            if not has_transient_range:
+                return
+        self._refreshing_gradient_geometry = True
+        gradient_format = None
+        if not neutral and self.fontformat.gradient_enabled:
+            gradient_format = QTextCharFormat()
+            gradient_format.setForeground(self.get_text_gradient())
+            gradient_format.setProperty(GRADIENT_LAYOUT_FORMAT_PROPERTY, True)
+        try:
+            formats_changed = False
+            block = self.document().firstBlock()
+            while block.isValid():
+                layout = block.layout()
+                old_ranges = layout.formats()
+                ranges = []
+                removed_transient = False
+                for format_range in old_ranges:
+                    if bool(
+                        format_range.format.property(
+                            GRADIENT_LAYOUT_FORMAT_PROPERTY
+                        )
+                    ):
+                        removed_transient = True
+                    else:
+                        ranges.append(format_range)
                 text_length = block.length() - 1
-                if self.fontformat.gradient_enabled and text_length > 0:
+                add_transient = gradient_format is not None and text_length > 0
+                if add_transient:
                     format_range = QTextLayout.FormatRange()
                     format_range.start = 0
                     format_range.length = text_length
                     format_range.format = gradient_format
                     ranges.append(format_range)
-                layout.setFormats(ranges)
+                if removed_transient or add_transient:
+                    layout.setFormats(ranges)
+                    formats_changed = True
                 block = block.next()
-            # setFormats invalidates QTextLine objects. Rebuild them through
-            # the attached custom layout; this changes no document state.
-            self.layout.reLayout()
-            self.update()
+            if formats_changed:
+                # setFormats invalidates QTextLine objects. Rebuild them through
+                # the attached custom layout; this changes no document state.
+                self.layout.reLayout()
+                self.update()
         finally:
             self._refreshing_gradient_geometry = False
 

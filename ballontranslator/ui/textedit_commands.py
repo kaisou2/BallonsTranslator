@@ -159,7 +159,9 @@ class ApplyFontformatCommand(QUndoCommand):
         self.old_html_lst = []
         self.old_rect_lst = []
         self.old_fmt_lst = []
-        self.new_fmt = fontformat
+        # Redo must replay the format that was applied when the command was
+        # created, even if the live global/preset format changes afterwards.
+        self.new_fmt = fontformat.deepcopy()
         self.trans_widget_lst = trans_widget_lst
         self.shape_ctrl = shape_ctrl
         self.overlay_sync = overlay_sync

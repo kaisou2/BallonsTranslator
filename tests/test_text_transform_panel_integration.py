@@ -317,6 +317,30 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         self.assertEqual(self.canvas.undo_stack.count(), 1)
         self.assertEqual(control.editor.text(), '50.0%')
 
+    def test_reselected_transform_survives_format_snapshot_and_save_sync(self):
+        item = make_item(
+            horizontal=1.0,
+            vertical=0.8,
+            slant=10.0,
+            glyph_slant=12.0,
+        )
+        self.select_one(item)
+        self.panel.set_textblk_item(None)
+        self.assertIsNot(item.fontformat, item.blk.fontformat)
+        self.select_one(item)
+
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        control.editor.setText('150%')
+        control._on_text_edited()
+        self.assertTrue(control.commit_pending())
+        expected = (1.5, 0.8, 10.0, 12.0)
+        self.assertEqual(item.blk.fontformat.text_transform, expected)
+        self.assertEqual(item.get_fontformat().text_transform, expected)
+
+        # Ctrl+S reaches this item boundary through updateTextBlkList().
+        item.updateBlkFormat()
+        self.assertEqual(item.blk.fontformat.text_transform, expected)
+
     def test_refresh_rounding_never_overwrites_precise_canonical_value(self):
         item = make_item(horizontal=1.234567)
         self.select_one(item)
