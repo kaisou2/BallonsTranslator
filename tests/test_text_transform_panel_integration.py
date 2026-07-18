@@ -8,9 +8,9 @@ from unittest import mock
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from qtpy.QtCore import QEvent, QPoint, QPointF, Qt
-from qtpy.QtGui import QKeySequence, QMouseEvent
+from qtpy.QtGui import QCloseEvent, QKeySequence, QMouseEvent
 from qtpy.QtTest import QTest
-from qtpy.QtWidgets import QApplication, QLineEdit, QShortcut
+from qtpy.QtWidgets import QApplication, QLineEdit, QShortcut, QWidget
 
 try:
     from qtpy.QtWidgets import QUndoStack
@@ -257,6 +257,7 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         from ballontranslator.ui import mainwindow as mainwindow_module
 
         events = []
+        page_state = {'row': 0}
         canvas = self.canvas
         canvas.projstate_unsaved = False
         original_push = canvas.push_undo_command
@@ -265,8 +266,14 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
             original_push(command)
             canvas.projstate_unsaved = True
             events.append(
-                ('push', tracked_item.blk.fontformat.horizontal_scale)
+                (
+                    'push',
+                    tracked_item.blk.fontformat.horizontal_scale,
+                    bool(harness.page_changing),
+                )
             )
+            if not harness.page_changing:
+                harness.global_search_widget.set_document_edited()
 
         def clear_undostack(update_saved_step=False):
             events.append(('clear-undo', bool(update_saved_step)))
@@ -276,7 +283,11 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         canvas.clear_undostack = clear_undostack
         canvas.text_change_unsaved = lambda: canvas.projstate_unsaved
         canvas.draw_change_unsaved = lambda: False
-        canvas.updateCanvas = lambda: events.append(('canvas-update',))
+        def update_canvas():
+            events.append(('canvas-update',))
+            canvas.projstate_unsaved = False
+
+        canvas.updateCanvas = update_canvas
 
         class PageIndex:
             @staticmethod
@@ -285,12 +296,14 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
 
             @staticmethod
             def row():
-                return 0
+                return page_state['row']
 
         class PageItem:
-            @staticmethod
-            def text():
-                return 'page-b.png'
+            def __init__(self, name):
+                self.name = name
+
+            def text(self):
+                return self.name
 
         class PageList:
             @staticmethod
@@ -303,21 +316,30 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
 
             @staticmethod
             def currentItem():
-                return PageItem()
+                return PageItem(('page-a.png', 'page-b.png')[page_state['row']])
 
             @staticmethod
             def setCurrentRow(row):
-                events.append(('shortcut-row', int(row)))
+                row = int(row)
+                events.append(('shortcut-row', row))
+                if row == page_state['row']:
+                    return
+                page_state['row'] = row
                 mainwindow_module.MainWindow.pageListCurrentItemChanged(harness)
 
         class Project:
             current_img = 'page-a.png'
+
+            @staticmethod
+            def pagename2idx(name):
+                return {'page-a.png': 0, 'page-b.png': 1}[name]
 
             def set_current_img(self, name):
                 events.append(('set-current', name))
                 self.current_img = name
 
         def save_current_page(*_args, **_kwargs):
+            harness.save_calls.append(dict(_kwargs))
             events.append(
                 (
                     'save',
@@ -350,10 +372,15 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
             canvas=canvas,
             st_manager=manager,
             imgtrans_proj=Project(),
+            global_search_widget=SimpleNamespace(
+                page_set=set(),
+                set_document_edited=lambda: events.append(('document-edited',)),
+            ),
             titleBar=SimpleNamespace(setTitleContent=lambda **_kwargs: None),
             module_manager=SimpleNamespace(handle_page_changed=lambda: None),
             drawingPanel=SimpleNamespace(handle_page_changed=lambda: None),
             saveCurrentPage=save_current_page,
+            save_calls=[],
         )
         harness.conditional_save = MethodType(
             mainwindow_module.MainWindow.conditional_save,
@@ -370,6 +397,77 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         harness.page_shortcut = shortcut
         self.addCleanup(shortcut.deleteLater)
         return harness, events
+
+    def make_close_harness(self, *, project_empty=False):
+        from ballontranslator.ui import mainwindow as mainwindow_module
+
+        events = []
+        canvas = self.canvas
+        canvas.projstate_unsaved = False
+        original_push = canvas.push_undo_command
+
+        def push_undo_command(command):
+            original_push(command)
+            canvas.projstate_unsaved = True
+            events.append(('push',))
+
+        canvas.push_undo_command = push_undo_command
+        canvas.text_change_unsaved = lambda: canvas.projstate_unsaved
+        canvas.draw_change_unsaved = lambda: False
+        canvas.prepareClose = lambda: events.append(('prepare-close',))
+
+        window = mainwindow_module.MainWindow.__new__(mainwindow_module.MainWindow)
+        QWidget.__init__(window)
+
+        def cleanup_window():
+            window.deleteLater()
+            _APP.processEvents()
+
+        self.addCleanup(cleanup_window)
+
+        def save_current_page(*_args, **_kwargs):
+            events.append(
+                (
+                    'save',
+                    None
+                    if self.panel.textblk_item is None
+                    else self.panel.textblk_item.blk.fontformat.horizontal_scale,
+                )
+            )
+            canvas.projstate_unsaved = False
+
+        window.opening_dir = False
+        window.canvas = canvas
+        window.imgtrans_proj = SimpleNamespace(is_empty=project_empty)
+        window.imsave_thread = SimpleNamespace(isRunning=lambda: False)
+        window.st_manager = SimpleNamespace(
+            formatpanel=self.panel,
+            hovering_transwidget=object(),
+            blockSignals=lambda blocked: events.append(
+                ('block-signals', bool(blocked))
+            ),
+        )
+        window.saveCurrentPage = save_current_page
+        window.conditional_save = MethodType(
+            mainwindow_module.MainWindow.conditional_save,
+            window,
+        )
+        window.save_config = lambda: events.append(
+            ('save-config', self.panel.global_format.horizontal_scale)
+        )
+        window.dispatch_close = lambda: self._dispatch_close_event(
+            mainwindow_module,
+            window,
+        )
+        self.panel.show()
+        _APP.processEvents()
+        return window, events
+
+    @staticmethod
+    def _dispatch_close_event(mainwindow_module, window):
+        event = QCloseEvent()
+        mainwindow_module.MainWindow.closeEvent(window, event)
+        return event
 
     def test_selected_numeric_commit_is_atomic_and_undoable(self):
         item = make_item(horizontal=1.0)
@@ -851,6 +949,88 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(self.canvas.undo_stack.count(), 0)
 
+    def test_close_commits_focused_local_numeric_before_dirty_check(self):
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        window, events = self.make_close_harness(project_empty=False)
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        control.editor.setFocus()
+        control.editor.selectAll()
+        QTest.keyClicks(control.editor, '150%')
+        _APP.processEvents()
+
+        self.assertIs(_APP.focusWidget(), control.editor)
+        self.assertEqual(control.state, control.PENDING_TEXT)
+        self.assertFalse(self.canvas.projstate_unsaved)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+
+        close_event = window.dispatch_close()
+        _APP.processEvents()
+
+        self.assertTrue(close_event.isAccepted())
+        self.assertEqual(control.state, control.IDLE)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.5)
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
+        self.assertIn(('save', 1.5), events)
+        event_names = [event[0] for event in events]
+        self.assertLess(event_names.index('push'), event_names.index('save'))
+        self.assertLess(event_names.index('save'), event_names.index('save-config'))
+
+    def test_close_commits_focused_global_numeric_before_config_save(self):
+        self.canvas.selection = []
+        self.panel.set_textblk_item(None)
+        window, events = self.make_close_harness(project_empty=True)
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        control.editor.setFocus()
+        control.editor.selectAll()
+        QTest.keyClicks(control.editor, '150%')
+        _APP.processEvents()
+
+        self.assertIs(_APP.focusWidget(), control.editor)
+        self.assertEqual(control.state, control.PENDING_TEXT)
+        self.assertEqual(self.panel.global_format.horizontal_scale, 1.0)
+
+        close_event = window.dispatch_close()
+        _APP.processEvents()
+
+        self.assertTrue(close_event.isAccepted())
+        self.assertEqual(control.state, control.IDLE)
+        self.assertEqual(self.panel.global_format.horizontal_scale, 1.5)
+        self.assertNotIn('save', [event[0] for event in events])
+        self.assertIn(('save-config', 1.5), events)
+
+    def test_close_cancels_held_transform_preview(self):
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        window, events = self.make_close_harness(project_empty=False)
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        center = control.label.rect().center()
+        QTest.mousePress(
+            control.label,
+            Qt.MouseButton.LeftButton,
+            pos=center,
+        )
+        send_held_mouse_move(control.label, center + QPoint(50, 0))
+        _APP.processEvents()
+
+        self.assertTrue(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.DRAG_PREVIEW)
+        self.assertEqual(
+            item._effective_text_transform().horizontal_scale,
+            1.5,
+        )
+
+        close_event = window.dispatch_close()
+        _APP.processEvents()
+
+        self.assertTrue(close_event.isAccepted())
+        self.assertFalse(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.IDLE)
+        self.assertIsNone(item._text_transform_preview)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+        self.assertNotIn('save', [event[0] for event in events])
+
     def test_page_shortcut_commits_pending_transform_before_old_owner_detaches(self):
         old_item = make_item(horizontal=1.0, idx=0)
         new_item = make_item(horizontal=1.0, idx=0)
@@ -886,6 +1066,114 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         self.assertEqual(old_item.blk.fontformat.horizontal_scale, 1.5)
         self.assertEqual(new_item.blk.fontformat.horizontal_scale, 1.0)
         self.assertEqual(self.canvas.undo_stack.count(), 0)
+
+    def test_global_search_page_move_saves_pending_transform_before_switch(self):
+        old_item = make_item(horizontal=1.0, idx=0)
+        new_item = make_item(horizontal=1.0, idx=0)
+        self.select_one(old_item)
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        harness, events = self.make_page_shortcut_harness(old_item)
+        harness.global_search_widget.page_set = {'page-b.png'}
+        control.editor.setFocus()
+        control.editor.setText('150%')
+        control._on_text_edited()
+        self.assertEqual(control.state, control.PENDING_TEXT)
+        self.assertFalse(self.canvas.projstate_unsaved)
+
+        from ballontranslator.ui import mainwindow as mainwindow_module
+
+        mainwindow_module.MainWindow.on_req_move_page(harness, 'page-b.png')
+        _APP.processEvents()
+
+        self.assertEqual(harness.imgtrans_proj.current_img, 'page-b.png')
+        self.assertEqual(old_item.blk.fontformat.horizontal_scale, 1.5)
+        self.assertEqual(new_item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(control.state, control.IDLE)
+        self.assertIsNone(self.panel.textblk_item)
+        self.assertEqual(self.panel._transform_items, [])
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+        self.assertFalse(self.canvas.projstate_unsaved)
+        self.assertTrue(harness.save_on_page_changed)
+        self.assertFalse(harness.page_changing)
+        self.assertEqual(harness.save_calls, [{}])
+        event_names = [event[0] for event in events]
+        self.assertLess(event_names.index('push'), event_names.index('save'))
+        self.assertLess(event_names.index('save'), event_names.index('set-current'))
+        self.assertIn(('push', 1.5, True), events)
+        self.assertIn(('save', 1.5, 1.5), events)
+        self.assertNotIn('document-edited', event_names)
+
+        self.canvas.selection = [new_item]
+        self.panel.set_textblk_item(new_item)
+        self.assertEqual(old_item.blk.fontformat.horizontal_scale, 1.5)
+        self.assertEqual(new_item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+
+    def test_global_search_force_save_same_page_keeps_transform_owner(self):
+        item = make_item(horizontal=1.0, idx=0)
+        self.select_one(item)
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        harness, events = self.make_page_shortcut_harness(item)
+        control.editor.setText('150%')
+        control._on_text_edited()
+
+        from ballontranslator.ui import mainwindow as mainwindow_module
+
+        mainwindow_module.MainWindow.on_req_move_page(
+            harness,
+            'page-a.png',
+            force_save=True,
+        )
+        _APP.processEvents()
+
+        self.assertEqual(harness.imgtrans_proj.current_img, 'page-a.png')
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.5)
+        self.assertEqual(control.state, control.IDLE)
+        self.assertIs(self.panel.textblk_item, item)
+        self.assertEqual(self.panel._transform_items, [item])
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
+        self.assertFalse(self.canvas.projstate_unsaved)
+        self.assertTrue(harness.save_on_page_changed)
+        self.assertFalse(harness.page_changing)
+        self.assertEqual(harness.save_calls, [{}])
+        self.assertIn(('push', 1.5, True), events)
+        self.assertIn(('save', 1.5, 1.5), events)
+        self.assertNotIn('set-current', [event[0] for event in events])
+        self.assertNotIn('scene-update', [event[0] for event in events])
+        self.assertNotIn('document-edited', [event[0] for event in events])
+
+    def test_global_search_page_move_cancels_held_transform_preview(self):
+        old_item = make_item(horizontal=1.0, idx=0)
+        self.select_one(old_item)
+        self.panel.show()
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        harness, events = self.make_page_shortcut_harness(old_item)
+        harness.global_search_widget.page_set = {'page-b.png'}
+        center = control.label.rect().center()
+        QTest.mousePress(
+            control.label,
+            Qt.MouseButton.LeftButton,
+            pos=center,
+        )
+        send_held_mouse_move(control.label, center + QPoint(50, 0))
+        _APP.processEvents()
+        self.assertTrue(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.DRAG_PREVIEW)
+
+        from ballontranslator.ui import mainwindow as mainwindow_module
+
+        mainwindow_module.MainWindow.on_req_move_page(harness, 'page-b.png')
+        _APP.processEvents()
+
+        self.assertEqual(harness.imgtrans_proj.current_img, 'page-b.png')
+        self.assertFalse(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.IDLE)
+        self.assertIsNone(old_item._text_transform_preview)
+        self.assertEqual(old_item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+        self.assertEqual(harness.save_calls, [])
+        self.assertNotIn('save', [event[0] for event in events])
+        self.assertNotIn('document-edited', [event[0] for event in events])
 
     def test_page_shortcut_cancels_held_transform_before_scene_replacement(self):
         old_item = make_item(horizontal=1.0, idx=0)

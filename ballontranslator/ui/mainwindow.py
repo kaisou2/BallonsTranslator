@@ -758,6 +758,9 @@ class MainWindow(mainwindow_cls):
         save_config()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        # Pending numeric edits are not dirty until they commit. Resolve them
+        # before the close-time dirty check and final config snapshot.
+        self.st_manager.formatpanel.resolve_text_transform_edits_for_save()
         if not self.imgtrans_proj.is_empty:
             self.conditional_save(keep_exist_as_backup=True)
         while True:
@@ -1207,6 +1210,17 @@ class MainWindow(mainwindow_cls):
             # 修复 Bug：提前返回时必须恢复自动保存的开关状态
             self.save_on_page_changed = ori_save 
             return
+
+        # This path disables the normal page-change save callback. Commit the
+        # old page's pending transform before its own dirty check, while
+        # suppressing the search-result invalidation normally caused by a new
+        # text undo command during an in-progress replace/rerender operation.
+        page_changing = self.page_changing
+        self.page_changing = True
+        try:
+            self.st_manager.formatpanel.resolve_text_transform_edits_for_save()
+        finally:
+            self.page_changing = page_changing
 
         if current_img not in self.global_search_widget.page_set:
             if self.canvas.projstate_unsaved: 
