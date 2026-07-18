@@ -110,11 +110,6 @@ class TextGuideOverlayItem(QGraphicsItem):
         self.update()
         return True
 
-    def refreshDeviceGeometry(self) -> bool:
-        if self._polygon.isEmpty():
-            return False
-        return self.setGuide(self._polygon, self._selected)
-
     def boundingRect(self) -> QRectF:
         return QRectF(self._bounds)
 
@@ -327,7 +322,6 @@ class TextOverlayManager:
                 continue
             overlay = self._acquire_overlay(item)
             overlay.setGuide(self._item_parent_polygon(item), selected)
-            overlay.refreshDeviceGeometry()
             overlay.show()
 
     def sync_overlays(self, *_args, **_kwargs) -> None:

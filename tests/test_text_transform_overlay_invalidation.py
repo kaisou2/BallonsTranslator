@@ -145,7 +145,13 @@ class TextTransformOverlayInvalidationTests(unittest.TestCase):
         self.assertEqual(overlay.cacheMode(), QGraphicsItem.CacheMode.NoCache)
 
         item.setSelected(True)
-        manager.sync_overlays()
+        with mock.patch.object(
+            overlay,
+            'setGuide',
+            wraps=overlay.setGuide,
+        ) as set_guide:
+            manager.sync_overlays()
+        self.assertEqual(set_guide.call_count, 1)
         self.assertTrue(overlay._selected)
         old_rects = {
             view: overlay.deviceTransform(view.viewportTransform())
