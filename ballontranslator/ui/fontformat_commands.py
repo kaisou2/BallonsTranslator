@@ -185,8 +185,7 @@ def ffmt_change_angle(param_name: str, values: float, act_ffmt: FontFormat, is_g
             RotateItemCommand(
                 blkitems,
                 values,
-                SW.canvas.txtblkShapeControl,
-                SW.canvas.sync_text_overlays,
+                overlay_sync=SW.canvas.sync_text_overlays,
             )
         )
 

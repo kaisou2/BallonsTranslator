@@ -177,7 +177,10 @@ class TextTransformShapeControlTests(unittest.TestCase):
             ),
         )
         new_rect = item.absBoundingRect(qrect=True)
-        command = ReshapeItemCommand(item, control)
+        command = ReshapeItemCommand(
+            item,
+            overlay_sync=control.updateBoundingRect,
+        )
 
         command.redo()
         command.undo()

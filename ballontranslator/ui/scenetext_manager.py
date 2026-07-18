@@ -647,7 +647,6 @@ class SceneTextManager(QObject):
             self.canvas.push_undo_command(
                 MoveBlkItemsCommand(
                     items,
-                    self.txtblkShapeControl,
                     before_positions=before,
                     after_positions=after,
                     overlay_sync=self.text_overlay_manager.sync_overlays,
@@ -662,8 +661,7 @@ class SceneTextManager(QObject):
         self.canvas.push_undo_command(
             ReshapeItemCommand(
                 item,
-                self.txtblkShapeControl,
-                self.text_overlay_manager.sync_overlays,
+                overlay_sync=self.text_overlay_manager.sync_overlays,
             )
         )
 
@@ -674,8 +672,7 @@ class SceneTextManager(QObject):
                 RotateItemCommand(
                     blk_item,
                     new_angle,
-                    self.txtblkShapeControl,
-                    self.text_overlay_manager.sync_overlays,
+                    overlay_sync=self.text_overlay_manager.sync_overlays,
                 )
             )
 
@@ -759,8 +756,7 @@ class SceneTextManager(QObject):
             self.canvas.push_undo_command(
                 ResetAngleCommand(
                     selected_blks,
-                    self.txtblkShapeControl,
-                    self.text_overlay_manager.sync_overlays,
+                    overlay_sync=self.text_overlay_manager.sync_overlays,
                 )
             )
 
@@ -1024,7 +1020,6 @@ class SceneTextManager(QObject):
         self.canvas.push_undo_command(
             RotateItemCommand(
                 item,
-                shape_ctrl=self.txtblkShapeControl,
                 overlay_sync=self.text_overlay_manager.sync_overlays,
             )
         )
@@ -1089,8 +1084,7 @@ class SceneTextManager(QObject):
                     selected_blks,
                     trans_widget_list,
                     fontformat,
-                    self.txtblkShapeControl,
-                    self.text_overlay_manager.sync_overlays,
+                    overlay_sync=self.text_overlay_manager.sync_overlays,
                 )
             )
             if self.formatpanel.global_mode():

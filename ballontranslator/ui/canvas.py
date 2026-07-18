@@ -34,7 +34,6 @@ class MoveByKeyCommand(QUndoCommand):
         self,
         blkitems: List[TextBlkItem],
         direction: QPointF,
-        shape_ctrl: TextBlkShapeControl,
         overlay_sync=None,
     ) -> None:
         super().__init__()
@@ -42,30 +41,25 @@ class MoveByKeyCommand(QUndoCommand):
         self.direction = direction
         self.ori_pos_list = []
         self.end_pos_list = []
-        self.shape_ctrl = shape_ctrl
         self.overlay_sync = overlay_sync
         for blk in blkitems:
             pos = blk.logical_position()
             self.ori_pos_list.append(pos)
             self.end_pos_list.append(pos + direction)
 
-    def _refresh_overlays(self):
-        if self.overlay_sync is not None:
-            self.overlay_sync()
-        elif self.shape_ctrl.blk_item in self.blkitems:
-            self.shape_ctrl.updateBoundingRect()
-
     def undo(self):
         for blk, pos in zip(self.blkitems, self.ori_pos_list):
             blk.set_logical_position(pos)
             blk.oldPos = blk.pos()
-        self._refresh_overlays()
+        if self.overlay_sync is not None:
+            self.overlay_sync()
 
     def redo(self):
         for blk, pos in zip(self.blkitems, self.end_pos_list):
             blk.set_logical_position(pos)
             blk.oldPos = blk.pos()
-        self._refresh_overlays()
+        if self.overlay_sync is not None:
+            self.overlay_sync()
 
     def mergeWith(self, other: QUndoCommand) -> bool:
         canmerge = self.blkitems == other.blkitems and self.direction == other.direction
@@ -575,8 +569,7 @@ class Canvas(QGraphicsScene):
                 cmd = MoveByKeyCommand(
                     sel_blkitems,
                     direction,
-                    self.txtblkShapeControl,
-                    self.sync_text_overlays,
+                    overlay_sync=self.sync_text_overlays,
                 )
                 self.push_undo_command(cmd)
                 event.setAccepted(True)

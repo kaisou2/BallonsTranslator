@@ -70,15 +70,6 @@ class FakeTransEdit:
         return self._document
 
 
-class TrackingShapeControl:
-    def __init__(self, item):
-        self.blk_item = item
-        self.refresh_count = 0
-
-    def updateBoundingRect(self):
-        self.refresh_count += 1
-
-
 class SetTextTransformCommandTest(unittest.TestCase):
     def test_multi_item_command_is_atomic_and_restores_only_transforms(self):
         items = [
@@ -229,8 +220,7 @@ class LogicalMoveCommandTest(unittest.TestCase):
             MoveByKeyCommand(
                 [item],
                 delta,
-                TrackingShapeControl(item),
-                lambda: refreshes.append('sync'),
+                overlay_sync=lambda: refreshes.append('sync'),
             )
         )
         self.assertPointAlmostEqual(item.logical_position(), before + delta)
@@ -334,8 +324,7 @@ class ApplyFontformatCommandTest(unittest.TestCase):
                 [item],
                 [FakeTransEdit()],
                 target,
-                TrackingShapeControl(item),
-                lambda: refreshes.append('sync'),
+                overlay_sync=lambda: refreshes.append('sync'),
             )
         )
         stack.undo()
@@ -362,12 +351,7 @@ class RotationCommandOverlaySyncTest(unittest.TestCase):
         stack.push(
             ResetAngleCommand(
                 [item],
-                SimpleNamespace(
-                    blk_item=None,
-                    setAngle=Mock(),
-                    updateBoundingRect=Mock(),
-                ),
-                lambda: refreshes.append('sync'),
+                overlay_sync=lambda: refreshes.append('sync'),
             )
         )
         stack.undo()

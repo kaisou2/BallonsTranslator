@@ -347,7 +347,9 @@ class TextTransformOverlayInvalidationTests(unittest.TestCase):
         self.assertEqual(syncs, [])
 
         command = RotateItemCommand(
-            item, committed_angle, control, sync_once
+            item,
+            committed_angle,
+            overlay_sync=sync_once,
         )
         command.redo()
         self.assertEqual(syncs, ['sync'])
