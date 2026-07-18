@@ -233,23 +233,29 @@ def _render_glyph_geometry(geometry, char_format, margin=32.0):
     return _image_array(image)
 
 
-def _render_scene(item, source=QRectF(0, 0, 380, 280)):
+def _render_attached_scene(scene, source=QRectF(0, 0, 380, 280)):
     image = QImage(
         max(1, math.ceil(source.width())),
         max(1, math.ceil(source.height())),
         QImage.Format.Format_ARGB32,
     )
     image.fill(Qt.GlobalColor.transparent)
-    scene = QGraphicsScene()
-    scene.setSceneRect(source)
-    scene.addItem(item)
     painter = QPainter(image)
     try:
         scene.render(painter, QRectF(image.rect()), source)
     finally:
         painter.end()
-        scene.removeItem(item)
     return _image_array(image)
+
+
+def _render_scene(item, source=QRectF(0, 0, 380, 280)):
+    scene = QGraphicsScene()
+    scene.setSceneRect(source)
+    scene.addItem(item)
+    try:
+        return _render_attached_scene(scene, source)
+    finally:
+        scene.removeItem(item)
 
 
 def _line_snapshot(item):
@@ -1114,6 +1120,90 @@ class GlyphSlantRenderingTests(unittest.TestCase):
                 )
                 self.assertEqual(item.layout.glyph_slant_angle, 0.0)
                 self.assertEqual(_geometry_snapshot(item), before)
+
+    def test_undo_to_neutral_syncs_detached_render_format_and_stroke(self):
+        source = QRectF(0, 0, 380, 280)
+        text = (
+            'Без труда не вытащишь и рыбку из пруда.\n'
+            '冰冻三尺，非一日之寒。\n'
+            '猿も木から落ちる。\n'
+            "Don't judge a book by its cover.\n"
+            '벼는 익을수록 고개를 숙인다.'
+        )
+        item = _make_item(
+            text=text,
+            stroke_width=0.1,
+        )
+        scene = QGraphicsScene()
+        scene.setSceneRect(source)
+        scene.addItem(item)
+        try:
+            _render_attached_scene(scene, source)
+            before_pixels = _render_attached_scene(scene, source)
+            item.set_export_effect_render(True)
+            try:
+                before_export_pixels = _render_attached_scene(scene, source)
+            finally:
+                item.set_export_effect_render(False)
+
+            stack = QUndoStack()
+            stack.push(
+                SetTextTransformCommand(
+                    [item],
+                    [(1.0, 1.0, 0.0, 0.0)],
+                    [(1.0, 1.0, 0.0, 40.0)],
+                )
+            )
+            _render_attached_scene(scene, source)
+            self.assertIsNotNone(item.background_pixmap)
+            active_cache_key = item.background_pixmap.cacheKey()
+
+            # FontFormatPanel snapshots the active format when selection moves
+            # away, so the render/UI cache can be detached from TextBlock.
+            item.fontformat = item.fontformat.deepcopy()
+            self.assertIsNot(item.fontformat, item.blk.fontformat)
+            self.assertEqual(item.fontformat.glyph_slant_angle, 40.0)
+
+            stack.undo()
+
+            neutral = (1.0, 1.0, 0.0, 0.0)
+            self.assertEqual(item.blk.fontformat.text_transform, neutral)
+            self.assertEqual(item.fontformat.text_transform, neutral)
+            self.assertEqual(item.layout.glyph_slant_angle, 0.0)
+            self.assertIsNotNone(item.background_pixmap)
+            self.assertNotEqual(
+                item.background_pixmap.cacheKey(),
+                active_cache_key,
+            )
+            after_pixels = _render_attached_scene(scene, source)
+            # Qt 6 can shift a small number of antialiased edge samples when a
+            # device cache is rebuilt. The stale 40-degree stroke changes over
+            # 12% of this image; a correct neutral rebuild stays below 2%.
+            changed_pixels = np.count_nonzero(
+                np.any(after_pixels != before_pixels, axis=2)
+            )
+            self.assertLessEqual(
+                changed_pixels,
+                math.ceil(before_pixels.shape[0] * before_pixels.shape[1] * 0.02),
+            )
+            item.set_export_effect_render(True)
+            try:
+                after_export_pixels = _render_attached_scene(scene, source)
+            finally:
+                item.set_export_effect_render(False)
+            changed_export_pixels = np.count_nonzero(
+                np.any(after_export_pixels != before_export_pixels, axis=2)
+            )
+            self.assertLessEqual(
+                changed_export_pixels,
+                math.ceil(
+                    before_export_pixels.shape[0]
+                    * before_export_pixels.shape[1]
+                    * 0.02
+                ),
+            )
+        finally:
+            scene.removeItem(item)
 
     def test_neutral_restore_preserves_base_effect_and_existing_padding(self):
         effect_cases = (

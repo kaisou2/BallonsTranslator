@@ -1538,14 +1538,30 @@ class TextBlkItem(QGraphicsTextItem):
                 or finalized
             )
 
+        model_format = self.blk.fontformat
+        render_format = self.fontformat
         model_changed = raw_canonical != target
+        render_format_changed = (
+            render_format is not None
+            and render_format is not model_format
+            and render_format.text_transform != target
+        )
         if model_changed:
-            fontformat = self.blk.fontformat
             (
-                fontformat.horizontal_scale,
-                fontformat.vertical_scale,
-                fontformat.slant_angle,
-                fontformat.glyph_slant_angle,
+                model_format.horizontal_scale,
+                model_format.vertical_scale,
+                model_format.slant_angle,
+                model_format.glyph_slant_angle,
+            ) = target
+        if render_format_changed:
+            # Selection changes can detach the render/UI format cache from the
+            # canonical TextBlock owner. Keep its quartet coherent before a
+            # neutral stroke/effect surface is rebuilt during Undo/Redo.
+            (
+                render_format.horizontal_scale,
+                render_format.vertical_scale,
+                render_format.slant_angle,
+                render_format.glyph_slant_angle,
             ) = target
         self._text_transform_preview = None
         glyph_changed, glyph_padding_changed = self._apply_glyph_slant(
@@ -1564,6 +1580,7 @@ class TextBlkItem(QGraphicsTextItem):
         )
         return (
             model_changed
+            or render_format_changed
             or glyph_changed
             or active_state_changed
             or visual_changed
