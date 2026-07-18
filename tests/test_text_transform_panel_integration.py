@@ -6,7 +6,8 @@ from unittest import mock
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from qtpy.QtCore import Qt
+from qtpy.QtCore import QEvent, QPoint, QPointF, Qt
+from qtpy.QtGui import QMouseEvent
 from qtpy.QtTest import QTest
 from qtpy.QtWidgets import QApplication, QLineEdit
 
@@ -25,6 +26,19 @@ from ballontranslator.utils.textblock import TextBlock
 
 
 _APP = QApplication.instance() or QApplication([])
+
+
+def send_held_mouse_move(widget, pos):
+    event = QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(pos),
+        QPointF(widget.mapTo(widget.window(), pos)),
+        QPointF(widget.mapToGlobal(pos)),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(widget, event)
 
 
 class TrackingTextBlkItem(TextBlkItem):
@@ -629,7 +643,11 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         self.assertIs(_APP.focusWidget(), control.label)
         self.canvas.selection = []
         self.panel.set_textblk_item(None)
-        control._move_drag(50)
+        send_held_mouse_move(
+            control.label,
+            control.label.rect().center() + QPoint(50, 0),
+        )
+        _APP.processEvents()
         self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
         self.assertEqual(
             item._effective_text_transform().horizontal_scale,
@@ -639,6 +657,7 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         events = self.save_current_page(item)
 
         self.assertEqual(control.state, control.IDLE)
+        self.assertFalse(control.label.mouse_pressed)
         self.assertIsNone(item._text_transform_preview)
         self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
         self.assertEqual(
@@ -654,10 +673,63 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
                 ('render-result', 1.0, 1.0),
             ],
         )
+        send_held_mouse_move(
+            control.label,
+            control.label.rect().center() + QPoint(10, 0),
+        )
+        _APP.processEvents()
+        self.assertFalse(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.IDLE)
+        self.assertIsNone(item._text_transform_preview)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
         QTest.mouseRelease(control.label, Qt.MouseButton.LeftButton)
         _APP.processEvents()
         self.assertIsNone(item._text_transform_preview)
         self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+
+    def test_save_aborts_pressed_label_after_control_refresh(self):
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        self.panel.show()
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        QTest.mousePress(control.label, Qt.MouseButton.LeftButton)
+        _APP.processEvents()
+        self.assertTrue(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.DRAG_PREVIEW)
+
+        self.canvas.selection = []
+        self.panel.set_textblk_item(None)
+        self.assertTrue(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.IDLE)
+
+        events = self.save_current_page(item)
+
+        self.assertFalse(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.IDLE)
+        self.assertEqual(
+            events,
+            [
+                ('update-blocks', 1.0, 1.0),
+                ('project-save', 1.0, 1.0),
+                ('render-result', 1.0, 1.0),
+            ],
+        )
+        send_held_mouse_move(
+            control.label,
+            control.label.rect().center() + QPoint(50, 0),
+        )
+        QTest.mouseRelease(control.label, Qt.MouseButton.LeftButton)
+        _APP.processEvents()
+        self.assertFalse(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.IDLE)
+        self.assertIsNone(item._text_transform_preview)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(
+            item._effective_text_transform().horizontal_scale,
+            1.0,
+        )
         self.assertEqual(self.canvas.undo_stack.count(), 0)
 
     def test_panel_external_focus_enters_global_mode(self):

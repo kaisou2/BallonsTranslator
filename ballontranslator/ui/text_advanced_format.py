@@ -243,6 +243,12 @@ class TransformDragLabel(SmallSizeControlLabel):
             self.drag_started.emit()
         return super().mousePressEvent(event)
 
+    def abort_drag_session(self):
+        # Qt still delivers the matching move/release events for the physical
+        # press. Clear the label-owned latch so those moves cannot restart a
+        # preview after an external transaction boundary canceled it.
+        self.mouse_pressed = False
+
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key.Key_Escape and self.mouse_pressed:
             self.mouse_pressed = False
@@ -450,6 +456,9 @@ class CommittedTransformControl(QWidget):
             )
 
     def cancel_preview(self):
+        # A control refresh can already have changed state to IDLE while its
+        # label still owns the physical press, so abort before the state check.
+        self.label.abort_drag_session()
         if self.state != self.DRAG_PREVIEW:
             return
         self.state = self.IDLE
