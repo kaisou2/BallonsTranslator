@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -140,6 +141,102 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
     def select_many(self, items):
         self.canvas.selection = list(items)
         self.panel.set_textblk_item(None, multi_select=True)
+
+    def save_current_page(
+        self,
+        item,
+        *,
+        update_scene_text=True,
+        save_proj=True,
+    ):
+        from ballontranslator.ui import mainwindow as mainwindow_module
+
+        events = []
+
+        class Project:
+            img_valid = True
+            current_img = 'page.png'
+
+            @staticmethod
+            def result_dir():
+                return os.getcwd()
+
+            @staticmethod
+            def get_result_path(_name):
+                return os.path.join(os.getcwd(), 'unused-result.png')
+
+            @staticmethod
+            def current_has_alpha():
+                return True
+
+            @staticmethod
+            def save(**_kwargs):
+                events.append(
+                    (
+                        'project-save',
+                        item.blk.fontformat.horizontal_scale,
+                        item._effective_text_transform().horizontal_scale,
+                    )
+                )
+
+        class Manager:
+            formatpanel = self.panel
+            txtblkShapeControl = SimpleNamespace(isVisible=lambda: False)
+
+            @staticmethod
+            def updateTextBlkList():
+                item.updateBlkFormat()
+                events.append(
+                    (
+                        'update-blocks',
+                        item.blk.fontformat.horizontal_scale,
+                        item._effective_text_transform().horizontal_scale,
+                    )
+                )
+
+        class Canvas:
+            @staticmethod
+            def render_result_img():
+                events.append(
+                    (
+                        'render-result',
+                        item.blk.fontformat.horizontal_scale,
+                        item._effective_text_transform().horizontal_scale,
+                    )
+                )
+                return object()
+
+            @staticmethod
+            def setProjSaveState(_state):
+                pass
+
+            @staticmethod
+            def update_saved_undostep():
+                pass
+
+        harness = SimpleNamespace(
+            imgtrans_proj=Project(),
+            st_manager=Manager(),
+            canvas=Canvas(),
+            rightComicTransStackPanel=SimpleNamespace(isHidden=lambda: False),
+            bottomBar=SimpleNamespace(),
+            imsave_thread=SimpleNamespace(
+                saveImg=lambda *_args, **_kwargs: None
+            ),
+        )
+        with mock.patch.object(
+            mainwindow_module.pcfg,
+            'imgtrans_textblock',
+            False,
+        ):
+            mainwindow_module.MainWindow.saveCurrentPage(
+                harness,
+                update_scene_text=update_scene_text,
+                save_proj=save_proj,
+                restore_interface=False,
+                save_rst_only=True,
+            )
+        return events
 
     def test_selected_numeric_commit_is_atomic_and_undoable(self):
         item = make_item(horizontal=1.0)
@@ -456,9 +553,112 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         control._move_drag(50)
         QTest.mouseRelease(control.label, Qt.MouseButton.LeftButton)
         _APP.processEvents()
+        self.assertIsNone(item._text_transform_preview)
         self.assertEqual(item.blk.fontformat.horizontal_scale, 1.5)
         self.assertEqual(self.panel.global_format.text_transform, global_before)
         self.assertEqual(self.canvas.undo_stack.count(), 1)
+
+    def test_render_only_save_does_not_resolve_live_preview(self):
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        self.panel.show()
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        QTest.mousePress(control.label, Qt.MouseButton.LeftButton)
+        _APP.processEvents()
+        self.canvas.selection = []
+        self.panel.set_textblk_item(None)
+        control._move_drag(50)
+
+        events = self.save_current_page(
+            item,
+            update_scene_text=False,
+            save_proj=False,
+        )
+
+        self.assertEqual(control.state, control.DRAG_PREVIEW)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(
+            item._effective_text_transform().horizontal_scale,
+            1.5,
+        )
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+        self.assertEqual(events, [('render-result', 1.0, 1.5)])
+        QTest.keyClick(control.label, Qt.Key.Key_Escape)
+        QTest.mouseRelease(control.label, Qt.MouseButton.LeftButton)
+        _APP.processEvents()
+        self.assertIsNone(item._text_transform_preview)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(
+            item._effective_text_transform().horizontal_scale,
+            1.0,
+        )
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+
+    def test_save_commits_pending_numeric_before_snapshot_and_render(self):
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        control.editor.setText('175%')
+        control._on_text_edited()
+
+        events = self.save_current_page(item)
+
+        self.assertEqual(control.state, control.IDLE)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.75)
+        self.assertEqual(
+            item._effective_text_transform().horizontal_scale,
+            1.75,
+        )
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
+        self.assertEqual(
+            events,
+            [
+                ('update-blocks', 1.75, 1.75),
+                ('project-save', 1.75, 1.75),
+                ('render-result', 1.75, 1.75),
+            ],
+        )
+
+    def test_save_cancels_unreleased_drag_before_snapshot_and_render(self):
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        self.panel.show()
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        QTest.mousePress(control.label, Qt.MouseButton.LeftButton)
+        _APP.processEvents()
+        self.assertIs(_APP.focusWidget(), control.label)
+        self.canvas.selection = []
+        self.panel.set_textblk_item(None)
+        control._move_drag(50)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(
+            item._effective_text_transform().horizontal_scale,
+            1.5,
+        )
+
+        events = self.save_current_page(item)
+
+        self.assertEqual(control.state, control.IDLE)
+        self.assertIsNone(item._text_transform_preview)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(
+            item._effective_text_transform().horizontal_scale,
+            1.0,
+        )
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+        self.assertEqual(
+            events,
+            [
+                ('update-blocks', 1.0, 1.0),
+                ('project-save', 1.0, 1.0),
+                ('render-result', 1.0, 1.0),
+            ],
+        )
+        QTest.mouseRelease(control.label, Qt.MouseButton.LeftButton)
+        _APP.processEvents()
+        self.assertIsNone(item._text_transform_preview)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
 
     def test_panel_external_focus_enters_global_mode(self):
         item = make_item(horizontal=1.0)

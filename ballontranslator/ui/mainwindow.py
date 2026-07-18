@@ -1276,7 +1276,13 @@ class MainWindow(mainwindow_cls):
         
         if not self.imgtrans_proj.img_valid:
             return
-        
+
+        if update_scene_text or save_proj:
+            # Resolve text-transform editor state before both the canonical
+            # project snapshot and the result-image render consume it. The
+            # render-only translation completion path saves its project first.
+            self.st_manager.formatpanel.resolve_text_transform_edits_for_save()
+
         if restore_interface:
             set_canvas_focus = self.canvas.hasFocus()
             sel_textitem = self.canvas.selected_text_items()

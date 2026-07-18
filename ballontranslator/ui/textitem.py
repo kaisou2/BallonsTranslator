@@ -1449,16 +1449,37 @@ class TextBlkItem(QGraphicsTextItem):
                 self._request_text_transform_update()
         return changed
 
-    def _apply_glyph_slant(self, angle: float) -> bool:
+    def _apply_glyph_slant(self, angle: float) -> Tuple[bool, bool]:
         if self.layout is None:
-            return False
+            return False, False
         if not self.layout.setGlyphSlantAngle(angle):
-            return False
+            return False, False
         self._mark_effect_cache_dirty()
-        self._update_effect_padding()
+        padding_changed = self._update_effect_padding()
         self.refresh_cache_policy()
         self.update()
-        return True
+        return True, padding_changed
+
+    def _reconcile_active_text_transform_state(
+        self,
+        was_visual_neutral: bool,
+        target: TextTransform,
+        glyph_changed: bool,
+        glyph_padding_changed: bool,
+    ) -> bool:
+        neutral = TextTransform(1.0, 1.0, 0.0, 0.0)
+        if not was_visual_neutral or target == neutral:
+            return False
+        # Box-only transforms do not change the glyph silhouette and can have
+        # no raster effects to enter _draw_effects(). Reconcile geometry here
+        # so retained BASE padding and the active gradient range cannot leak
+        # across a neutral-to-active transition.
+        padding_changed = glyph_padding_changed
+        if not glyph_changed:
+            padding_changed = self._update_effect_padding()
+        if self.fontformat.gradient_enabled and not padding_changed:
+            self._refresh_gradient_geometry()
+        return padding_changed
 
     def set_text_transform(
         self,
@@ -1496,13 +1517,26 @@ class TextBlkItem(QGraphicsTextItem):
             if target == current:
                 return False
             self._text_transform_preview = None if target == canonical else target
-            glyph_changed = self._apply_glyph_slant(target.glyph_slant_angle)
+            glyph_changed, glyph_padding_changed = self._apply_glyph_slant(
+                target.glyph_slant_angle
+            )
+            active_state_changed = self._reconcile_active_text_transform_state(
+                was_visual_neutral,
+                target,
+                glyph_changed,
+                glyph_padding_changed,
+            )
             box_changed = self._apply_text_transform(target)
             finalized = self._finalize_neutral_text_transform(
                 was_visual_neutral,
                 target,
             )
-            return glyph_changed or box_changed or finalized
+            return (
+                glyph_changed
+                or active_state_changed
+                or box_changed
+                or finalized
+            )
 
         model_changed = raw_canonical != target
         if model_changed:
@@ -1514,13 +1548,27 @@ class TextBlkItem(QGraphicsTextItem):
                 fontformat.glyph_slant_angle,
             ) = target
         self._text_transform_preview = None
-        glyph_changed = self._apply_glyph_slant(target.glyph_slant_angle)
+        glyph_changed, glyph_padding_changed = self._apply_glyph_slant(
+            target.glyph_slant_angle
+        )
+        active_state_changed = self._reconcile_active_text_transform_state(
+            was_visual_neutral,
+            target,
+            glyph_changed,
+            glyph_padding_changed,
+        )
         visual_changed = self._apply_text_transform(target)
         finalized = self._finalize_neutral_text_transform(
             was_visual_neutral,
             target,
         )
-        return model_changed or glyph_changed or visual_changed or finalized
+        return (
+            model_changed
+            or glyph_changed
+            or active_state_changed
+            or visual_changed
+            or finalized
+        )
 
     def clear_text_transform_preview(self) -> bool:
         if self._text_transform_preview is None:
@@ -1534,13 +1582,26 @@ class TextBlkItem(QGraphicsTextItem):
             and self._text_transform_entry_padding is None
         ):
             self._text_transform_entry_padding = self.padding()
-        glyph_changed = self._apply_glyph_slant(target.glyph_slant_angle)
+        glyph_changed, glyph_padding_changed = self._apply_glyph_slant(
+            target.glyph_slant_angle
+        )
+        active_state_changed = self._reconcile_active_text_transform_state(
+            was_visual_neutral,
+            target,
+            glyph_changed,
+            glyph_padding_changed,
+        )
         box_changed = self._apply_text_transform(target)
         finalized = self._finalize_neutral_text_transform(
             was_visual_neutral,
             target,
         )
-        return glyph_changed or box_changed or finalized
+        return (
+            glyph_changed
+            or active_state_changed
+            or box_changed
+            or finalized
+        )
 
     def setCenterTransform(self) -> bool:
         center = self.logical_unpadded_rect().center()

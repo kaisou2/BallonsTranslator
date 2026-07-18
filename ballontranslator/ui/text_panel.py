@@ -664,6 +664,20 @@ class FontFormatPanel(Widget):
         if geometry_changed:
             self._sync_text_transform_overlays()
 
+    def resolve_text_transform_edits_for_save(self):
+        """Resolve transient transform editors before snapshot and render."""
+        # Typed input is complete form state, while a drag whose mouse button is
+        # still down remains a preview under the existing selection-boundary
+        # policy. Commit the former and cancel the latter before either save
+        # consumer runs.
+        self.textadvancedfmt_panel.finish_pending_transform_edits()
+        for control in self.textadvancedfmt_panel.transform_controls.values():
+            control.cancel_preview()
+        # Keep programmatic preview callers safe even when no control owns the
+        # session and therefore emitted no preview_canceled signal above.
+        if self._transform_drag_before is not None:
+            self.on_text_transform_cancel(self._transform_drag_param)
+
     def update_text_style_label(self):
         if self.global_mode():
             active_text_style_label = self.active_text_style_label()

@@ -1467,6 +1467,241 @@ class GlyphSlantRenderingTests(unittest.TestCase):
                     active_export_pixels,
                 )
 
+    def test_effectless_box_reentry_reconciles_padding_and_gradient_state(self):
+        gradient_property = textitem_module.GRADIENT_LAYOUT_FORMAT_PROPERTY
+        unrelated_property = gradient_property + 1
+        for transition in ('preview-clear', 'commit-zero', 'undo'):
+            with self.subTest(transition=transition):
+                item = _make_item(
+                    text='BOX EFFECTLESS',
+                    gradient=True,
+                    shadow_radius=0.01,
+                    shadow_strength=1.0,
+                )
+                block_layout = item.document().firstBlock().layout()
+                unrelated_format = QTextCharFormat()
+                unrelated_format.setProperty(unrelated_property, True)
+                unrelated_range = QTextLayout.FormatRange()
+                unrelated_range.start = 0
+                unrelated_range.length = 1
+                unrelated_range.format = unrelated_format
+                block_layout.setFormats(
+                    list(block_layout.formats()) + [unrelated_range]
+                )
+                item.layout.reLayout()
+
+                stack = None
+                if transition == 'preview-clear':
+                    self.assertTrue(
+                        item.set_text_transform(
+                            horizontal_scale=1.5,
+                            preview=True,
+                        )
+                    )
+                elif transition == 'commit-zero':
+                    self.assertTrue(
+                        item.set_text_transform(horizontal_scale=1.5)
+                    )
+                else:
+                    stack = QUndoStack()
+                    stack.push(
+                        SetTextTransformCommand(
+                            [item],
+                            [(1.0, 1.0, 0.0, 0.0)],
+                            [(1.5, 1.0, 0.0, 0.0)],
+                        )
+                    )
+
+                # Establish the active gradient, then remove the final raster
+                # effect while retaining the BASE neutral padding high-water.
+                _render_scene(item)
+                item.setBGAttribute('shadow_strength', 0.0)
+                active_pixels = _render_scene(item)
+                item.set_export_effect_render(True)
+                try:
+                    active_export_pixels = _render_scene(item)
+                finally:
+                    item.set_export_effect_render(False)
+                active_generation = item._effect_cache_generation
+                self.assertEqual(item.padding(), 0.0)
+                self.assertGreater(
+                    _layout_property_range_count(item, gradient_property),
+                    0,
+                )
+                self.assertEqual(
+                    _layout_property_range_count(item, unrelated_property),
+                    1,
+                )
+
+                if transition == 'preview-clear':
+                    self.assertTrue(item.clear_text_transform_preview())
+                elif transition == 'commit-zero':
+                    self.assertTrue(
+                        item.set_text_transform(horizontal_scale=1.0)
+                    )
+                else:
+                    stack.undo()
+
+                self.assertGreater(item.padding(), 0.0)
+                self.assertEqual(
+                    _layout_property_range_count(item, gradient_property),
+                    0,
+                )
+                self.assertEqual(
+                    _layout_property_range_count(item, unrelated_property),
+                    1,
+                )
+
+                with mock.patch.object(
+                    item,
+                    '_render_effect_surface',
+                    wraps=item._render_effect_surface,
+                ) as render_effect:
+                    if transition == 'preview-clear':
+                        self.assertTrue(
+                            item.set_text_transform(
+                                horizontal_scale=1.5,
+                                preview=True,
+                            )
+                        )
+                    elif transition == 'commit-zero':
+                        self.assertTrue(
+                            item.set_text_transform(horizontal_scale=1.5)
+                        )
+                    else:
+                        stack.redo()
+                    reentered_pixels = _render_scene(item)
+                    self.assertEqual(render_effect.call_count, 0)
+
+                self.assertEqual(item.padding(), 0.0)
+                self.assertEqual(
+                    item._effect_cache_generation,
+                    active_generation,
+                )
+                self.assertGreater(
+                    _layout_property_range_count(item, gradient_property),
+                    0,
+                )
+                self.assertEqual(
+                    _layout_property_range_count(item, unrelated_property),
+                    1,
+                )
+                np.testing.assert_array_equal(reentered_pixels, active_pixels)
+                item.set_export_effect_render(True)
+                try:
+                    reentered_export_pixels = _render_scene(item)
+                finally:
+                    item.set_export_effect_render(False)
+                np.testing.assert_array_equal(
+                    reentered_export_pixels,
+                    active_export_pixels,
+                )
+
+                # A later Box-only change in the same active interval remains
+                # vector-only and must not invalidate the effect generation.
+                with mock.patch.object(
+                    item,
+                    '_render_effect_surface',
+                    wraps=item._render_effect_surface,
+                ) as render_effect:
+                    self.assertTrue(
+                        item.set_text_transform(
+                            horizontal_scale=1.6,
+                            preview=transition == 'preview-clear',
+                        )
+                    )
+                    _render_scene(item)
+                    self.assertEqual(render_effect.call_count, 0)
+                self.assertEqual(
+                    item._effect_cache_generation,
+                    active_generation,
+                )
+
+    def test_effectless_box_canonical_reentry_after_neutral_preview(self):
+        gradient_property = textitem_module.GRADIENT_LAYOUT_FORMAT_PROPERTY
+        item = _make_item(
+            text='BOX CANONICAL REENTRY',
+            gradient=True,
+            shadow_radius=0.01,
+            shadow_strength=1.0,
+        )
+        self.assertTrue(item.set_text_transform(horizontal_scale=1.5))
+        _render_scene(item)
+        item.setBGAttribute('shadow_strength', 0.0)
+        active_pixels = _render_scene(item)
+        item.set_export_effect_render(True)
+        try:
+            active_export_pixels = _render_scene(item)
+        finally:
+            item.set_export_effect_render(False)
+        self.assertEqual(item.padding(), 0.0)
+        self.assertGreater(
+            _layout_property_range_count(item, gradient_property),
+            0,
+        )
+
+        self.assertTrue(
+            item.set_text_transform(horizontal_scale=1.0, preview=True)
+        )
+        self.assertGreater(item.padding(), 0.0)
+        self.assertEqual(
+            _layout_property_range_count(item, gradient_property),
+            0,
+        )
+
+        self.assertTrue(item.clear_text_transform_preview())
+        self.assertEqual(item.padding(), 0.0)
+        self.assertGreater(
+            _layout_property_range_count(item, gradient_property),
+            0,
+        )
+        np.testing.assert_array_equal(_render_scene(item), active_pixels)
+        item.set_export_effect_render(True)
+        try:
+            reentered_export_pixels = _render_scene(item)
+        finally:
+            item.set_export_effect_render(False)
+        np.testing.assert_array_equal(
+            reentered_export_pixels,
+            active_export_pixels,
+        )
+
+    def test_effectless_box_first_entry_reconciles_retained_neutral_padding(self):
+        gradient_property = textitem_module.GRADIENT_LAYOUT_FORMAT_PROPERTY
+        item = _make_item(
+            text='BOX FIRST ENTRY',
+            gradient=True,
+            shadow_radius=0.01,
+            shadow_strength=0.0,
+        )
+        self.assertGreater(item.padding(), 0.0)
+        self.assertEqual(
+            _layout_property_range_count(item, gradient_property),
+            0,
+        )
+        generation = item._effect_cache_generation
+
+        with mock.patch.object(
+            item,
+            '_render_effect_surface',
+            wraps=item._render_effect_surface,
+        ) as render_effect:
+            self.assertTrue(
+                item.set_text_transform(
+                    horizontal_scale=1.5,
+                    preview=True,
+                )
+            )
+            _render_scene(item)
+            self.assertEqual(render_effect.call_count, 0)
+
+        self.assertEqual(item.padding(), 0.0)
+        self.assertGreater(
+            _layout_property_range_count(item, gradient_property),
+            0,
+        )
+        self.assertEqual(item._effect_cache_generation, generation)
+
     def test_staged_box_glyph_neutral_restore_removes_gradient_marker(self):
         gradient_property = textitem_module.GRADIENT_LAYOUT_FORMAT_PROPERTY
         unrelated_property = gradient_property + 1
