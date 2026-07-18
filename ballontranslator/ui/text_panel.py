@@ -784,6 +784,13 @@ class FontFormatPanel(Widget):
                 self.textblk_item = None
                 self.set_active_format(self.global_format, multi_select)
                 self.set_globalfmt_title()
+            elif not transform_items and self.textblk_item is not None:
+                # Selection can be momentarily empty while a format control or
+                # color dialog owns focus. Ordinary format controls keep editing
+                # the previous local item in this state; transforms must retain
+                # the same owner instead of falling through to global_format.
+                transform_items = [self.textblk_item]
+                self._transform_items = transform_items
             if transform_items:
                 self.textadvancedfmt_panel.set_transform_items(transform_items)
             

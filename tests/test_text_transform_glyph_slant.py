@@ -1303,6 +1303,206 @@ class GlyphSlantRenderingTests(unittest.TestCase):
                     before_export_pixels,
                 )
 
+    def test_box_only_neutral_restore_rebuilds_effects_and_gradient_state(self):
+        gradient_property = textitem_module.GRADIENT_LAYOUT_FORMAT_PROPERTY
+        unrelated_property = gradient_property + 1
+        for transition in ('preview-clear', 'commit-zero', 'undo'):
+            with self.subTest(transition=transition):
+                item = _make_item(
+                    text='BOX EFFECT',
+                    gradient=True,
+                    shadow_radius=0.01,
+                    shadow_strength=1.0,
+                )
+                block_layout = item.document().firstBlock().layout()
+                unrelated_format = QTextCharFormat()
+                unrelated_format.setProperty(unrelated_property, True)
+                unrelated_range = QTextLayout.FormatRange()
+                unrelated_range.start = 0
+                unrelated_range.length = 1
+                unrelated_range.format = unrelated_format
+                block_layout.setFormats(
+                    list(block_layout.formats()) + [unrelated_range]
+                )
+                item.layout.reLayout()
+
+                before = _geometry_snapshot(item)
+                before_html = item.toHtml()
+                before_pixels = _render_scene(item)
+                item.set_export_effect_render(True)
+                try:
+                    before_export_pixels = _render_scene(item)
+                finally:
+                    item.set_export_effect_render(False)
+
+                if transition == 'preview-clear':
+                    self.assertTrue(
+                        item.set_text_transform(
+                            horizontal_scale=1.5,
+                            preview=True,
+                        )
+                    )
+                elif transition == 'commit-zero':
+                    self.assertTrue(
+                        item.set_text_transform(horizontal_scale=1.5)
+                    )
+                else:
+                    stack = QUndoStack()
+                    stack.push(
+                        SetTextTransformCommand(
+                            [item],
+                            [(1.0, 1.0, 0.0, 0.0)],
+                            [(1.5, 1.0, 0.0, 0.0)],
+                        )
+                    )
+
+                _render_scene(item)
+                self.assertIsNotNone(item.background_pixmap)
+                active_cache_key = item.background_pixmap.cacheKey()
+                self.assertNotEqual(item.padding(), before[2])
+                self.assertGreater(
+                    _layout_property_range_count(item, gradient_property),
+                    0,
+                )
+
+                if transition == 'preview-clear':
+                    self.assertTrue(item.clear_text_transform_preview())
+                elif transition == 'commit-zero':
+                    self.assertTrue(
+                        item.set_text_transform(horizontal_scale=1.0)
+                    )
+                else:
+                    stack.undo()
+
+                self.assertEqual(_geometry_snapshot(item), before)
+                self.assertIsNone(item._text_transform_entry_padding)
+                self.assertEqual(item.toHtml(), before_html)
+                self.assertEqual(
+                    _layout_property_range_count(item, gradient_property),
+                    0,
+                )
+                self.assertEqual(
+                    _layout_property_range_count(item, unrelated_property),
+                    1,
+                )
+                self.assertIsNotNone(item.background_pixmap)
+                self.assertNotEqual(
+                    item.background_pixmap.cacheKey(),
+                    active_cache_key,
+                )
+                np.testing.assert_array_equal(
+                    _render_scene(item),
+                    before_pixels,
+                )
+                item.set_export_effect_render(True)
+                try:
+                    after_export_pixels = _render_scene(item)
+                finally:
+                    item.set_export_effect_render(False)
+                np.testing.assert_array_equal(
+                    after_export_pixels,
+                    before_export_pixels,
+                )
+
+    def test_staged_box_glyph_neutral_restore_removes_gradient_marker(self):
+        gradient_property = textitem_module.GRADIENT_LAYOUT_FORMAT_PROPERTY
+        unrelated_property = gradient_property + 1
+        item = _make_item(text='STAGED GRADIENT', gradient=True)
+        block_layout = item.document().firstBlock().layout()
+        unrelated_format = QTextCharFormat()
+        unrelated_format.setProperty(unrelated_property, True)
+        unrelated_range = QTextLayout.FormatRange()
+        unrelated_range.start = 0
+        unrelated_range.length = 1
+        unrelated_range.format = unrelated_format
+        block_layout.setFormats(
+            list(block_layout.formats()) + [unrelated_range]
+        )
+        item.layout.reLayout()
+        before = _geometry_snapshot(item)
+        before_html = item.toHtml()
+        before_pixels = _render_scene(item)
+
+        self.assertTrue(
+            item.set_text_transform(
+                horizontal_scale=1.5,
+                slant_angle=10.0,
+                glyph_slant_angle=45.0,
+            )
+        )
+        _render_scene(item)
+        self.assertTrue(item.set_text_transform(glyph_slant_angle=0.0))
+        self.assertGreater(
+            _layout_property_range_count(item, gradient_property),
+            0,
+        )
+        self.assertTrue(
+            item.set_text_transform(
+                horizontal_scale=1.0,
+                slant_angle=0.0,
+            )
+        )
+
+        self.assertEqual(_geometry_snapshot(item), before)
+        self.assertEqual(item.toHtml(), before_html)
+        self.assertEqual(
+            _layout_property_range_count(item, gradient_property),
+            0,
+        )
+        self.assertEqual(
+            _layout_property_range_count(item, unrelated_property),
+            1,
+        )
+        np.testing.assert_array_equal(_render_scene(item), before_pixels)
+
+    def test_loaded_box_only_transform_uses_neutral_effect_fallback(self):
+        effect_kwargs = {
+            'gradient': True,
+            'shadow_radius': 0.01,
+            'shadow_strength': 1.0,
+        }
+        neutral = _make_item(text='LOADED BOX', **effect_kwargs)
+        expected = _geometry_snapshot(neutral)
+        expected_pixels = _render_scene(neutral)
+        neutral.set_export_effect_render(True)
+        try:
+            expected_export_pixels = _render_scene(neutral)
+        finally:
+            neutral.set_export_effect_render(False)
+        item = _make_item(
+            text='LOADED BOX',
+            box_slant=10.0,
+            **effect_kwargs,
+        )
+        _render_scene(item)
+        active_cache_key = item.background_pixmap.cacheKey()
+
+        self.assertIsNotNone(item._text_transform_entry_padding)
+        self.assertTrue(item.set_text_transform(slant_angle=0.0))
+        self.assertEqual(_geometry_snapshot(item), expected)
+        self.assertIsNotNone(item.background_pixmap)
+        self.assertNotEqual(
+            item.background_pixmap.cacheKey(),
+            active_cache_key,
+        )
+        self.assertEqual(
+            _layout_property_range_count(
+                item,
+                textitem_module.GRADIENT_LAYOUT_FORMAT_PROPERTY,
+            ),
+            0,
+        )
+        np.testing.assert_array_equal(_render_scene(item), expected_pixels)
+        item.set_export_effect_render(True)
+        try:
+            actual_export_pixels = _render_scene(item)
+        finally:
+            item.set_export_effect_render(False)
+        np.testing.assert_array_equal(
+            actual_export_pixels,
+            expected_export_pixels,
+        )
+
     def test_loaded_and_staggered_transforms_restore_neutral_padding(self):
         for effect_kwargs in (
             {},

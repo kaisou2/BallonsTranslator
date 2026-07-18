@@ -1,5 +1,7 @@
 import os
+import sys
 import unittest
+from unittest import mock
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
@@ -98,27 +100,38 @@ class TrackingShapeControl:
 
 class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
     def setUp(self):
-        self.old_canvas = SW.canvas
-        self.old_active_format = C.active_format
-        self.old_register_view_widget = getattr(
+        had_register_view_widget = hasattr(app_shared, 'register_view_widget')
+        old_register_view_widget = getattr(
             app_shared, 'register_view_widget', None
         )
+
+        def restore_register_view_widget():
+            if had_register_view_widget:
+                app_shared.register_view_widget = old_register_view_widget
+            elif hasattr(app_shared, 'register_view_widget'):
+                del app_shared.register_view_widget
+
+        self.addCleanup(restore_register_view_widget)
         app_shared.register_view_widget = lambda *_args, **_kwargs: None
+
         self.canvas = FakeCanvas()
+        self.addCleanup(self.canvas.undo_stack.clear)
+        old_canvas = SW.canvas
+        self.addCleanup(setattr, SW, 'canvas', old_canvas)
         SW.canvas = self.canvas
+
+        old_active_format = C.active_format
+        self.addCleanup(setattr, C, 'active_format', old_active_format)
         self.panel = FontFormatPanel(_APP)
+
+        def cleanup_panel():
+            self.panel.close()
+            self.panel.deleteLater()
+            _APP.processEvents()
+
+        self.addCleanup(cleanup_panel)
         self.panel.global_format = FontFormat()
         self.panel.set_active_format(self.panel.global_format)
-
-    def tearDown(self):
-        self.panel.close()
-        self.canvas.undo_stack.clear()
-        SW.canvas = self.old_canvas
-        C.active_format = self.old_active_format
-        if self.old_register_view_widget is None:
-            del app_shared.register_view_widget
-        else:
-            app_shared.register_view_widget = self.old_register_view_widget
 
     def select_one(self, item):
         self.canvas.selection = [item]
@@ -341,6 +354,62 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         item.updateBlkFormat()
         self.assertEqual(item.blk.fontformat.text_transform, expected)
 
+    def test_focus_preserved_empty_selection_keeps_local_transform_owner(self):
+        item = make_item(
+            horizontal=1.0,
+            vertical=0.8,
+            slant=10.0,
+            glyph_slant=12.0,
+        )
+        self.select_one(item)
+        global_before = self.panel.global_format.text_transform
+
+        self.panel.focusOnColorDialog = True
+        self.canvas.selection = []
+        self.panel.set_textblk_item(None)
+        self.assertFalse(self.panel.global_mode())
+        self.assertIs(self.panel.textblk_item, item)
+        self.assertEqual(self.panel._transform_items, [item])
+
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        control.editor.setText('150%')
+        control._on_text_edited()
+        self.assertTrue(control.commit_pending())
+        self.assertEqual(
+            item.blk.fontformat.text_transform,
+            (1.5, 0.8, 10.0, 12.0),
+        )
+        self.assertEqual(self.panel.global_format.text_transform, global_before)
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
+
+        self.canvas.undo_stack.undo()
+        self.assertEqual(
+            item.blk.fontformat.text_transform,
+            (1.0, 0.8, 10.0, 12.0),
+        )
+
+    def test_focus_preserved_preview_cancel_and_drag_commit_stay_local(self):
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        global_before = self.panel.global_format.text_transform
+
+        self.panel.focusOnColorDialog = True
+        self.canvas.selection = []
+        self.panel.set_textblk_item(None)
+
+        self.panel.on_text_transform_preview('horizontal_scale', 0.5)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(item._effective_text_transform().horizontal_scale, 1.5)
+        self.panel.on_text_transform_cancel('horizontal_scale')
+        self.assertEqual(item._effective_text_transform().horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+
+        self.panel.on_text_transform_preview('horizontal_scale', 0.5)
+        self.panel.on_text_transform_drag_commit('horizontal_scale', 0.5)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.5)
+        self.assertEqual(self.panel.global_format.text_transform, global_before)
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
+
     def test_refresh_rounding_never_overwrites_precise_canonical_value(self):
         item = make_item(horizontal=1.234567)
         self.select_one(item)
@@ -355,6 +424,41 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         self.assertEqual(C.active_format.horizontal_scale, 1.234567)
         self.assertEqual(item.transform_api_calls, 0)
         self.assertEqual(self.canvas.undo_stack.count(), 0)
+
+
+class FontFormatPanelTransformSetupSafetyTest(unittest.TestCase):
+    def test_failed_panel_construction_restores_global_patches(self):
+        module = sys.modules[__name__]
+        old_canvas = SW.canvas
+        old_active_format = C.active_format
+        had_register_view_widget = hasattr(app_shared, 'register_view_widget')
+        old_register_view_widget = getattr(
+            app_shared, 'register_view_widget', None
+        )
+
+        with mock.patch.object(
+            module,
+            'FontFormatPanel',
+            side_effect=RuntimeError('forced panel construction failure'),
+        ):
+            nested = FontFormatPanelTransformIntegrationTest(
+                'test_selected_numeric_commit_is_atomic_and_undoable'
+            )
+            result = unittest.TestResult()
+            nested.run(result)
+
+        self.assertEqual(len(result.errors), 1)
+        self.assertIs(SW.canvas, old_canvas)
+        self.assertIs(C.active_format, old_active_format)
+        self.assertEqual(
+            hasattr(app_shared, 'register_view_widget'),
+            had_register_view_widget,
+        )
+        if had_register_view_widget:
+            self.assertIs(
+                app_shared.register_view_widget,
+                old_register_view_widget,
+            )
 
 
 if __name__ == '__main__':

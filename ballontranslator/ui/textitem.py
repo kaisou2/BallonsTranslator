@@ -144,7 +144,7 @@ class TextBlkItem(QGraphicsTextItem):
         self.blk: TextBlock = None
         self.fontformat: FontFormat = None
         self._text_transform_preview: Optional[TextTransform] = None
-        self._glyph_slant_entry_padding: Optional[float] = None
+        self._text_transform_entry_padding: Optional[float] = None
         self._effect_cache_generation = 0
         self._effect_cache_rendered_generation = -1
         self._effect_cache_dirty = False
@@ -764,12 +764,12 @@ class TextBlkItem(QGraphicsTextItem):
         return changed
 
     def _update_effect_padding(self):
-        if self._glyph_slant_entry_padding is not None:
+        if self._text_transform_entry_padding is not None:
             # Preserve the BASE grow-only high-water mark if an effect or font
-            # change raises it while Glyph Slant is active.  The transformed
-            # envelope may later shrink again before the neutral restore.
-            self._glyph_slant_entry_padding = max(
-                self._glyph_slant_entry_padding,
+            # change raises it while any text transform is active. The
+            # transformed envelope may later shrink before neutral restore.
+            self._text_transform_entry_padding = max(
+                self._text_transform_entry_padding,
                 self._neutral_effect_padding_floor(),
             )
         padding = self._effect_padding()
@@ -781,28 +781,44 @@ class TextBlkItem(QGraphicsTextItem):
             padding = math.ceil(layout_units) / 64.0
         return self._commit_effect_padding(padding)
 
-    def _restore_neutral_padding_after_glyph_slant(self) -> bool:
-        if (
-            self._glyph_slant_entry_padding is None
-            or not self._text_transform_is_neutral()
-        ):
+    def _finalize_neutral_text_transform(
+        self,
+        was_visual_neutral: bool,
+        target: TextTransform,
+    ) -> bool:
+        neutral = TextTransform(1.0, 1.0, 0.0, 0.0)
+        if was_visual_neutral or target != neutral:
             return False
+        entry_padding = self._text_transform_entry_padding
+        if entry_padding is None:
+            # Loaded or externally merged active state may not have an
+            # in-session neutral entry point.
+            entry_padding = self._neutral_effect_padding_floor()
         padding = max(
-            self._glyph_slant_entry_padding,
+            entry_padding,
             self._neutral_effect_padding_floor(),
         )
-        self._glyph_slant_entry_padding = None
-        changed = self._commit_effect_padding(
+        self._text_transform_entry_padding = None
+        self._commit_effect_padding(
             padding,
             allow_neutral_shrink=True,
         )
-        # Glyph Slant invalidates the effect pixmap.  Once the item returns to
-        # the BASE neutral paint path, that path no longer rebuilds effects
-        # lazily, so restore an active stroke/shadow cache immediately as well.
+
+        # Padding can already equal the neutral target, so cleanup must be
+        # driven by the transform transition rather than by a margin change.
+        self._refresh_gradient_geometry()
+        self._effect_tile_cache.clear()
+        self._force_effect_tiles = False
+        self._effect_direct_stroke = False
+        self._effect_cache_dirty = False
+        self._effect_cache_rendered_generation = self._effect_cache_generation
         if any(self._effect_flags()):
             self.repaint_background()
-            self.update()
-        return changed
+        else:
+            self.background_pixmap = None
+            self._background_pixmap_scale = None
+        self.update()
+        return True
 
     def _effect_flags(self) -> Tuple[bool, bool]:
         return (
@@ -1159,7 +1175,7 @@ class TextBlkItem(QGraphicsTextItem):
             set_char_fmt = True
 
         font_fmt = blk.fontformat
-        self._glyph_slant_entry_padding = None
+        self._text_transform_entry_padding = None
         if set_format:
             self.set_fontformat(font_fmt, set_char_format=set_char_fmt, set_stroke_width=False, set_effect=False)
 
@@ -1180,14 +1196,15 @@ class TextBlkItem(QGraphicsTextItem):
             self.setGradientEnabled(True)
         self.setShadow(font_fmt, repaint=False)
         self.setStrokeWidth(font_fmt.stroke_width, repaint_background=False)
-        if (
-            self._glyph_slant_entry_padding is None
-            and self.layout.glyph_slant_angle != 0.0
-        ):
+        if not self._text_transform_is_neutral():
             # Loaded active transforms have no in-session neutral entry point.
             # Seed the fallback after effects/text are initialized so later
             # style changes cannot erase the BASE neutral minimum.
-            self._glyph_slant_entry_padding = self._neutral_effect_padding_floor()
+            floor = self._neutral_effect_padding_floor()
+            self._text_transform_entry_padding = max(
+                self._text_transform_entry_padding or 0.0,
+                floor,
+            )
         self.setCenterTransform()
         self.repaint_background()
 
@@ -1202,6 +1219,12 @@ class TextBlkItem(QGraphicsTextItem):
     def _text_transform_is_neutral(self) -> bool:
         return self._effective_text_transform() == TextTransform(
             1.0, 1.0, 0.0, 0.0
+        )
+
+    def _visual_text_transform_is_neutral(self) -> bool:
+        return (
+            self.transform().isIdentity()
+            and (self.layout is None or self.layout.glyph_slant_angle == 0.0)
         )
 
     @contextmanager
@@ -1426,23 +1449,8 @@ class TextBlkItem(QGraphicsTextItem):
     def _apply_glyph_slant(self, angle: float) -> bool:
         if self.layout is None:
             return False
-        previous_angle = self.layout.glyph_slant_angle
         if not self.layout.setGlyphSlantAngle(angle):
             return False
-        if (
-            previous_angle == 0.0
-            and angle != 0.0
-            and self._glyph_slant_entry_padding is None
-        ):
-            self._glyph_slant_entry_padding = self.padding()
-        elif (
-            previous_angle != 0.0
-            and angle == 0.0
-            and self._glyph_slant_entry_padding is None
-        ):
-            # A project can load directly into active Glyph Slant without a
-            # neutral entry snapshot. Restore the same minimum BASE would use.
-            self._glyph_slant_entry_padding = self._neutral_effect_padding_floor()
         self._mark_effect_cache_dirty()
         self._update_effect_padding()
         self.refresh_cache_policy()
@@ -1473,6 +1481,13 @@ class TextBlkItem(QGraphicsTextItem):
             base[2] if slant_angle is None else slant_angle,
             base[3] if glyph_slant_angle is None else glyph_slant_angle,
         )
+        was_visual_neutral = self._visual_text_transform_is_neutral()
+        if (
+            was_visual_neutral
+            and target != TextTransform(1.0, 1.0, 0.0, 0.0)
+            and self._text_transform_entry_padding is None
+        ):
+            self._text_transform_entry_padding = self.padding()
 
         if preview:
             if target == current:
@@ -1480,8 +1495,11 @@ class TextBlkItem(QGraphicsTextItem):
             self._text_transform_preview = None if target == canonical else target
             glyph_changed = self._apply_glyph_slant(target.glyph_slant_angle)
             box_changed = self._apply_text_transform(target)
-            padding_changed = self._restore_neutral_padding_after_glyph_slant()
-            return glyph_changed or box_changed or padding_changed
+            finalized = self._finalize_neutral_text_transform(
+                was_visual_neutral,
+                target,
+            )
+            return glyph_changed or box_changed or finalized
 
         model_changed = raw_canonical != target
         if model_changed:
@@ -1495,18 +1513,31 @@ class TextBlkItem(QGraphicsTextItem):
         self._text_transform_preview = None
         glyph_changed = self._apply_glyph_slant(target.glyph_slant_angle)
         visual_changed = self._apply_text_transform(target)
-        padding_changed = self._restore_neutral_padding_after_glyph_slant()
-        return model_changed or glyph_changed or visual_changed or padding_changed
+        finalized = self._finalize_neutral_text_transform(
+            was_visual_neutral,
+            target,
+        )
+        return model_changed or glyph_changed or visual_changed or finalized
 
     def clear_text_transform_preview(self) -> bool:
         if self._text_transform_preview is None:
             return False
+        was_visual_neutral = self._visual_text_transform_is_neutral()
         self._text_transform_preview = None
         target = self._canonical_text_transform()
+        if (
+            was_visual_neutral
+            and target != TextTransform(1.0, 1.0, 0.0, 0.0)
+            and self._text_transform_entry_padding is None
+        ):
+            self._text_transform_entry_padding = self.padding()
         glyph_changed = self._apply_glyph_slant(target.glyph_slant_angle)
         box_changed = self._apply_text_transform(target)
-        padding_changed = self._restore_neutral_padding_after_glyph_slant()
-        return glyph_changed or box_changed or padding_changed
+        finalized = self._finalize_neutral_text_transform(
+            was_visual_neutral,
+            target,
+        )
+        return glyph_changed or box_changed or finalized
 
     def setCenterTransform(self) -> bool:
         center = self.logical_unpadded_rect().center()
@@ -2380,7 +2411,7 @@ class TextBlkItem(QGraphicsTextItem):
         self.document().setDefaultFont(font)
         format.setFont(font)
         if ffmat.gradient_enabled:
-            gradient = self.get_text_gradient(ffmat)
+            gradient = self.get_text_gradient(ffmat, persistent=True)
             format.setForeground(gradient)
         else:
             format.setForeground(QColor(*ffmat.foreground_color()))
@@ -2565,7 +2596,7 @@ class TextBlkItem(QGraphicsTextItem):
         cursor, after_kwargs = self._before_set_ffmt(set_selected, restore_cursor)
         cfmt = QTextCharFormat()
         if value:
-            gradient = self.get_text_gradient()
+            gradient = self.get_text_gradient(persistent=True)
             cfmt.setForeground(gradient)
         else:
             cfmt.setForeground(QColor(*[int(c) for c in self.fontformat.frgb]))
@@ -2637,7 +2668,12 @@ class TextBlkItem(QGraphicsTextItem):
         finally:
             self._refreshing_gradient_geometry = False
 
-    def get_text_gradient(self, fontformat: FontFormat = None):
+    def get_text_gradient(
+        self,
+        fontformat: FontFormat = None,
+        *,
+        persistent: bool = False,
+    ):
         gradient = QLinearGradient()
         if fontformat is None:
             fontformat = self.fontformat
@@ -2647,11 +2683,25 @@ class TextBlkItem(QGraphicsTextItem):
         dy = math.sin(rad)
         
         # Set gradient points with size adjustment
-        rect = (
-            self.boundingRect()
-            if self._text_transform_is_neutral()
-            else self.logical_unpadded_rect()
-        )
+        if persistent and not self._text_transform_is_neutral():
+            # The document foreground is the BASE-neutral fallback underneath
+            # the active layout-only gradient range. Reconstruct the neutral
+            # entry rectangle so removing that range cannot reveal coordinates
+            # derived from an active Box transform or its exact effect padding.
+            logical_rect = self.logical_unpadded_rect()
+            entry_padding = self._text_transform_entry_padding or 0.0
+            rect = QRectF(
+                0.0,
+                0.0,
+                logical_rect.width() + entry_padding * 2,
+                logical_rect.height() + entry_padding * 2,
+            )
+        else:
+            rect = (
+                self.boundingRect()
+                if self._text_transform_is_neutral()
+                else self.logical_unpadded_rect()
+            )
         center = rect.center()
         radius = max(rect.width(), rect.height()) * fontformat.gradient_size
         gradient.setStart(center.x() - dx * radius, center.y() - dy * radius)
