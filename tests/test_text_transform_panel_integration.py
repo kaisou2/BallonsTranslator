@@ -7,7 +7,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from qtpy.QtCore import Qt
 from qtpy.QtTest import QTest
-from qtpy.QtWidgets import QApplication
+from qtpy.QtWidgets import QApplication, QLineEdit
 
 try:
     from qtpy.QtWidgets import QUndoStack
@@ -407,6 +407,94 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         self.panel.on_text_transform_preview('horizontal_scale', 0.5)
         self.panel.on_text_transform_drag_commit('horizontal_scale', 0.5)
         self.assertEqual(item.blk.fontformat.horizontal_scale, 1.5)
+        self.assertEqual(self.panel.global_format.text_transform, global_before)
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
+
+    def test_nested_transform_editor_focus_keeps_local_owner(self):
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        global_before = self.panel.global_format.text_transform
+        self.panel.show()
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        control.editor.setFocus()
+        _APP.processEvents()
+        self.assertIs(_APP.focusWidget(), control.editor)
+
+        self.canvas.selection = []
+        self.panel.set_textblk_item(None)
+        self.assertFalse(self.panel.global_mode())
+        self.assertIs(self.panel.textblk_item, item)
+        self.assertEqual(self.panel._transform_items, [item])
+
+        control.editor.setText('150%')
+        control._on_text_edited()
+        self.assertTrue(control.commit_pending())
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.5)
+        self.assertEqual(self.panel.global_format.text_transform, global_before)
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
+
+    def test_nested_drag_label_focus_keeps_preview_and_commit_local(self):
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        global_before = self.panel.global_format.text_transform
+        self.panel.show()
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        QTest.mousePress(control.label, Qt.MouseButton.LeftButton)
+        _APP.processEvents()
+        self.assertIs(_APP.focusWidget(), control.label)
+
+        self.canvas.selection = []
+        self.panel.set_textblk_item(None)
+        control._move_drag(50)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(item._effective_text_transform().horizontal_scale, 1.5)
+        QTest.keyClick(control.label, Qt.Key.Key_Escape)
+        _APP.processEvents()
+        self.assertEqual(item._effective_text_transform().horizontal_scale, 1.0)
+
+        QTest.mousePress(control.label, Qt.MouseButton.LeftButton)
+        control._move_drag(50)
+        QTest.mouseRelease(control.label, Qt.MouseButton.LeftButton)
+        _APP.processEvents()
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.5)
+        self.assertEqual(self.panel.global_format.text_transform, global_before)
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
+
+    def test_panel_external_focus_enters_global_mode(self):
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        outside = QLineEdit()
+        self.addCleanup(outside.deleteLater)
+        outside.show()
+        outside.setFocus()
+        _APP.processEvents()
+        self.assertIs(_APP.focusWidget(), outside)
+
+        self.canvas.selection = []
+        self.panel.set_textblk_item(None)
+        self.assertTrue(self.panel.global_mode())
+        self.assertIsNone(self.panel.textblk_item)
+        self.assertEqual(self.panel._transform_items, [])
+
+    def test_descendant_focus_does_not_override_multi_selection(self):
+        first = make_item(horizontal=1.0, idx=0)
+        second = make_item(horizontal=0.8, idx=1)
+        self.select_one(first)
+        global_before = self.panel.global_format.text_transform
+        self.panel.show()
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        control.editor.setFocus()
+        _APP.processEvents()
+        self.assertIs(_APP.focusWidget(), control.editor)
+
+        self.canvas.selection = [first, second]
+        self.panel.set_textblk_item(None, multi_select=True)
+        self.assertEqual(self.panel._transform_items, [first, second])
+        self.assertTrue(self.panel.global_mode())
+        self.assertIsNone(self.panel.textblk_item)
+        self.panel.on_text_transform_commit('horizontal_scale', 1.5)
+        self.assertEqual(first.blk.fontformat.horizontal_scale, 1.5)
+        self.assertEqual(second.blk.fontformat.horizontal_scale, 1.5)
         self.assertEqual(self.panel.global_format.text_transform, global_before)
         self.assertEqual(self.canvas.undo_stack.count(), 1)
 

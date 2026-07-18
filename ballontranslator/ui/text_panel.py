@@ -769,14 +769,23 @@ class FontFormatPanel(Widget):
 
         if textblk_item is None:
             focus_w = self.app.focusWidget()
-            focus_p = None if focus_w is None else focus_w.parentWidget()
-            focus_on_fmtoptions = False
-            if self.focusOnColorDialog:
-                focus_on_fmtoptions = True
-            elif focus_p:
-                if focus_p == self or focus_p.parentWidget() == self:
-                    focus_on_fmtoptions = True
-            if not focus_on_fmtoptions:
+            focus_on_fmtoptions = self.focusOnColorDialog or (
+                focus_w is not None
+                and (focus_w is self or self.isAncestorOf(focus_w))
+            )
+            preserve_local_owner = (
+                not transform_items
+                and self.textblk_item is not None
+                and focus_on_fmtoptions
+            )
+            if preserve_local_owner:
+                # Selection can be momentarily empty while a format control or
+                # color dialog owns focus. Ordinary format controls keep editing
+                # the previous local item in this state; transforms must retain
+                # the same owner instead of falling through to global_format.
+                transform_items = [self.textblk_item]
+                self._transform_items = transform_items
+            else:
                 # Store the current text block's format before switching to global.
                 # This is BASE behavior and must also preserve the transform quartet.
                 if self.textblk_item is not None:
@@ -784,13 +793,6 @@ class FontFormatPanel(Widget):
                 self.textblk_item = None
                 self.set_active_format(self.global_format, multi_select)
                 self.set_globalfmt_title()
-            elif not transform_items and self.textblk_item is not None:
-                # Selection can be momentarily empty while a format control or
-                # color dialog owns focus. Ordinary format controls keep editing
-                # the previous local item in this state; transforms must retain
-                # the same owner instead of falling through to global_format.
-                transform_items = [self.textblk_item]
-                self._transform_items = transform_items
             if transform_items:
                 self.textadvancedfmt_panel.set_transform_items(transform_items)
             

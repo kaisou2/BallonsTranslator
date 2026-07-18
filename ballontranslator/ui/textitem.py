@@ -811,7 +811,10 @@ class TextBlkItem(QGraphicsTextItem):
         self._force_effect_tiles = False
         self._effect_direct_stroke = False
         self._effect_cache_dirty = False
-        self._effect_cache_rendered_generation = self._effect_cache_generation
+        # The rebuilt BASE-neutral pixmap is not an active-transform effect
+        # surface. Keep the active cache generation stale so a later Box-only
+        # re-entry cannot reuse the neutral pixmap at the same raster tier.
+        self._effect_cache_rendered_generation = -1
         if any(self._effect_flags()):
             self.repaint_background()
         else:

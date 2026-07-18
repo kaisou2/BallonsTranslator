@@ -1356,14 +1356,21 @@ class GlyphSlantRenderingTests(unittest.TestCase):
                         )
                     )
 
-                _render_scene(item)
+                active_pixels = _render_scene(item)
                 self.assertIsNotNone(item.background_pixmap)
                 active_cache_key = item.background_pixmap.cacheKey()
+                active_padding = item.padding()
+                active_generation = item._effect_cache_generation
                 self.assertNotEqual(item.padding(), before[2])
                 self.assertGreater(
                     _layout_property_range_count(item, gradient_property),
                     0,
                 )
+                item.set_export_effect_render(True)
+                try:
+                    active_export_pixels = _render_scene(item)
+                finally:
+                    item.set_export_effect_render(False)
 
                 if transition == 'preview-clear':
                     self.assertTrue(item.clear_text_transform_preview())
@@ -1390,6 +1397,8 @@ class GlyphSlantRenderingTests(unittest.TestCase):
                     item.background_pixmap.cacheKey(),
                     active_cache_key,
                 )
+                neutral_cache_key = item.background_pixmap.cacheKey()
+                self.assertEqual(item._effect_cache_rendered_generation, -1)
                 np.testing.assert_array_equal(
                     _render_scene(item),
                     before_pixels,
@@ -1402,6 +1411,60 @@ class GlyphSlantRenderingTests(unittest.TestCase):
                 np.testing.assert_array_equal(
                     after_export_pixels,
                     before_export_pixels,
+                )
+
+                with mock.patch.object(
+                    item,
+                    '_render_effect_surface',
+                    wraps=item._render_effect_surface,
+                ) as render_effect:
+                    if transition == 'preview-clear':
+                        self.assertTrue(
+                            item.set_text_transform(
+                                horizontal_scale=1.5,
+                                preview=True,
+                            )
+                        )
+                    elif transition == 'commit-zero':
+                        self.assertTrue(
+                            item.set_text_transform(horizontal_scale=1.5)
+                        )
+                    else:
+                        stack.redo()
+                    reentered_pixels = _render_scene(item)
+                    self.assertEqual(render_effect.call_count, 1)
+
+                self.assertEqual(item.padding(), active_padding)
+                self.assertEqual(
+                    item._effect_cache_generation,
+                    active_generation,
+                )
+                self.assertEqual(
+                    item._effect_cache_rendered_generation,
+                    active_generation,
+                )
+                self.assertGreater(
+                    _layout_property_range_count(item, gradient_property),
+                    0,
+                )
+                self.assertEqual(
+                    _layout_property_range_count(item, unrelated_property),
+                    1,
+                )
+                self.assertIsNotNone(item.background_pixmap)
+                self.assertNotEqual(
+                    item.background_pixmap.cacheKey(),
+                    neutral_cache_key,
+                )
+                np.testing.assert_array_equal(reentered_pixels, active_pixels)
+                item.set_export_effect_render(True)
+                try:
+                    reentered_export_pixels = _render_scene(item)
+                finally:
+                    item.set_export_effect_render(False)
+                np.testing.assert_array_equal(
+                    reentered_export_pixels,
+                    active_export_pixels,
                 )
 
     def test_staged_box_glyph_neutral_restore_removes_gradient_marker(self):
