@@ -681,6 +681,12 @@ class FontFormatPanel(Widget):
         self.textadvancedfmt_panel.finish_pending_transform_edits()
         self._cancel_text_transform_previews()
 
+    def resolve_text_transform_edits_for_history_change(self):
+        """Cancel an active preview before moving the application undo stack."""
+        # Pending text remains owned by its line editor. A held drag, however,
+        # must not survive the model refresh performed by undo/redo.
+        self._cancel_text_transform_previews()
+
     def resolve_text_transform_edits_for_page_change(self):
         """End old-page transform ownership before its scene is discarded."""
         self.resolve_text_transform_edits_for_save()

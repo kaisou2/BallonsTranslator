@@ -3,12 +3,18 @@ import unittest
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
+from qtpy import API_NAME, QT_VERSION
 from qtpy.QtCore import QPointF, QRectF
 from qtpy.QtWidgets import QApplication, QGraphicsItem, QGraphicsScene
 try:
     from qtpy.QtWidgets import QUndoStack
 except ImportError:
     from qtpy.QtGui import QUndoStack
+
+from ballontranslator.utils import shared as C
+
+C.FLAG_QT6 = QT_VERSION.startswith('6')
+C.USE_PYSIDE6 = API_NAME == 'PySide6'
 
 from ballontranslator.ui.scenetext_manager import (
     PasteBlkItemsCommand,

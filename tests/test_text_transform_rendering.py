@@ -31,7 +31,10 @@ def _render_font_family():
         families = QFontDatabase.applicationFontFamilies(font_id)
         if families:
             return families[0]
-    families = QFontDatabase.families()
+    try:
+        families = QFontDatabase.families()
+    except TypeError:  # PyQt5 exposes this as an instance method.
+        families = QFontDatabase().families()
     return families[0] if families else None
 
 

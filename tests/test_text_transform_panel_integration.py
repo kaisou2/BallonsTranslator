@@ -10,7 +10,19 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from qtpy.QtCore import QEvent, QPoint, QPointF, Qt
 from qtpy.QtGui import QCloseEvent, QKeySequence, QMouseEvent
 from qtpy.QtTest import QTest
-from qtpy.QtWidgets import QApplication, QLineEdit, QShortcut, QWidget
+from qtpy.QtWidgets import (
+    QApplication,
+    QLineEdit,
+    QMenu,
+    QShortcut,
+    QToolButton,
+    QWidget,
+)
+
+try:
+    from qtpy.QtGui import QAction
+except ImportError:
+    from qtpy.QtWidgets import QAction
 
 try:
     from qtpy.QtWidgets import QUndoStack
@@ -870,6 +882,128 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         self.assertIsNone(item._text_transform_preview)
         self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
         self.assertEqual(self.canvas.undo_stack.count(), 0)
+
+    def test_history_actions_cancel_held_drag_before_stack_move(self):
+        from ballontranslator.ui import mainwindow as mainwindow_module
+
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        self.panel.on_text_transform_commit('horizontal_scale', 1.2)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.2)
+        self.assertEqual(self.canvas.undo_stack.index(), 1)
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
+
+        host = self.make_shortcut_host()
+        edit_button = QToolButton(host)
+        edit_menu = QMenu(edit_button)
+        undo_action = QAction('Undo', host)
+        undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        redo_action = QAction('Redo', host)
+        redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        edit_menu.addActions([undo_action, redo_action])
+        edit_button.setMenu(edit_menu)
+        edit_button.show()
+
+        history_canvas = SimpleNamespace(
+            undo=self.canvas.undo_stack.undo,
+            redo=self.canvas.undo_stack.redo,
+        )
+        harness = SimpleNamespace(
+            canvas=history_canvas,
+            st_manager=SimpleNamespace(formatpanel=self.panel),
+        )
+        undo_action.triggered.connect(
+            lambda _checked=False: mainwindow_module.MainWindow.on_undo(harness)
+        )
+        redo_action.triggered.connect(
+            lambda _checked=False: mainwindow_module.MainWindow.on_redo(harness)
+        )
+
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        center = control.label.rect().center()
+
+        QTest.mousePress(
+            control.label,
+            Qt.MouseButton.LeftButton,
+            pos=center,
+        )
+        send_held_mouse_move(control.label, center + QPoint(30, 0))
+        _APP.processEvents()
+        self.assertTrue(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.DRAG_PREVIEW)
+        self.assertEqual(
+            item._effective_text_transform().horizontal_scale,
+            1.5,
+        )
+
+        undo_action.trigger()
+        _APP.processEvents()
+
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertIsNone(item._text_transform_preview)
+        self.assertFalse(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.IDLE)
+        self.assertIsNone(self.panel._transform_drag_before)
+        self.assertIsNone(self.panel._transform_drag_after)
+        self.assertIsNone(self.panel._transform_drag_param)
+        self.assertEqual(self.canvas.undo_stack.index(), 0)
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
+        self.assertTrue(self.canvas.undo_stack.canRedo())
+
+        send_held_mouse_move(control.label, center + QPoint(40, 0))
+        QTest.mouseRelease(
+            control.label,
+            Qt.MouseButton.LeftButton,
+            pos=center + QPoint(40, 0),
+        )
+        _APP.processEvents()
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.index(), 0)
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
+        self.assertTrue(self.canvas.undo_stack.canRedo())
+
+        QTest.mousePress(
+            control.label,
+            Qt.MouseButton.LeftButton,
+            pos=center,
+        )
+        send_held_mouse_move(control.label, center + QPoint(50, 0))
+        _APP.processEvents()
+        self.assertTrue(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.DRAG_PREVIEW)
+        self.assertEqual(
+            item._effective_text_transform().horizontal_scale,
+            1.5,
+        )
+
+        redo_action.trigger()
+        _APP.processEvents()
+
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.2)
+        self.assertIsNone(item._text_transform_preview)
+        self.assertFalse(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.IDLE)
+        self.assertIsNone(self.panel._transform_drag_before)
+        self.assertIsNone(self.panel._transform_drag_after)
+        self.assertIsNone(self.panel._transform_drag_param)
+        self.assertEqual(self.canvas.undo_stack.index(), 1)
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
+
+        send_held_mouse_move(control.label, center + QPoint(60, 0))
+        QTest.mouseRelease(
+            control.label,
+            Qt.MouseButton.LeftButton,
+            pos=center + QPoint(60, 0),
+        )
+        _APP.processEvents()
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.2)
+        self.assertEqual(self.canvas.undo_stack.index(), 1)
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
+
+        undo_action.trigger()
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.index(), 0)
+        self.assertEqual(self.canvas.undo_stack.count(), 1)
 
     def test_selection_change_commits_pending_value_to_old_target(self):
         old_item = make_item(horizontal=1.0, idx=0)

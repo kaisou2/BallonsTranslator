@@ -196,6 +196,24 @@ def _paint_live_layout(item, context=None):
     return _image_array(image)
 
 
+def _paint_live_layout_in_scene(item, context=None):
+    image = QImage(380, 280, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    try:
+        # Compare on the shared scene pixel grid. Glyph-slant padding can be
+        # fractional and asymmetric, while item position preserves the same
+        # logical scene origin.
+        painter.setWorldTransform(item.sceneTransform())
+        item._paint_live_layout(
+            painter,
+            item._effect_paint_context() if context is None else context,
+        )
+    finally:
+        painter.end()
+    return _image_array(image)
+
+
 def _render_glyph_geometry(geometry, char_format, margin=32.0):
     rect = geometry.bounds.adjusted(-margin, -margin, margin, margin)
     image = QImage(
@@ -950,17 +968,7 @@ class GlyphSlantRenderingTests(unittest.TestCase):
             with mock.patch.object(
                 text_glyph_renderer, 'draw_glyph_geometry'
             ):
-                pixels = _paint_live_layout(item, context)
-            bounds = item.boundingRect()
-            logical = item.logical_unpadded_rect()
-            left = round(logical.left() - bounds.left())
-            top = round(logical.top() - bounds.top())
-            images.append(
-                pixels[
-                    top:top + round(logical.height()),
-                    left:left + round(logical.width()),
-                ]
-            )
+                images.append(_paint_live_layout_in_scene(item, context))
 
         np.testing.assert_array_equal(images[0], images[1])
         self.assertGreater(int((images[0][..., 3] > 0).sum()), 20)
@@ -1325,6 +1333,11 @@ class GlyphSlantRenderingTests(unittest.TestCase):
                     list(block_layout.formats()) + [unrelated_range]
                 )
                 item.layout.reLayout()
+                # Direct QTextLayout mutation does not invalidate the item's
+                # effect pixmap. Synchronize the baseline before testing that
+                # transform entry and neutral return rebuild it correctly.
+                item.repaint_background()
+                _APP.processEvents()
 
                 before = _geometry_snapshot(item)
                 before_html = item.toHtml()

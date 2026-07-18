@@ -980,9 +980,11 @@ class MainWindow(mainwindow_cls):
             self.textPanel.formatpanel.formatBtnGroup.underlineBtn.click()
 
     def on_redo(self):
+        self.st_manager.formatpanel.resolve_text_transform_edits_for_history_change()
         self.canvas.redo()
 
     def on_undo(self):
+        self.st_manager.formatpanel.resolve_text_transform_edits_for_history_change()
         self.canvas.undo()
 
     def on_page_search(self):
