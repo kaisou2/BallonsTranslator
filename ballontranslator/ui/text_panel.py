@@ -664,6 +664,14 @@ class FontFormatPanel(Widget):
         if geometry_changed:
             self._sync_text_transform_overlays()
 
+    def _cancel_text_transform_previews(self):
+        for control in self.textadvancedfmt_panel.transform_controls.values():
+            control.cancel_preview()
+        # Keep programmatic preview callers safe even when no control owns the
+        # session and therefore emitted no preview_canceled signal above.
+        if self._transform_drag_before is not None:
+            self.on_text_transform_cancel(self._transform_drag_param)
+
     def resolve_text_transform_edits_for_save(self):
         """Resolve transient transform editors before snapshot and render."""
         # Typed input is complete form state, while a drag whose mouse button is
@@ -671,12 +679,7 @@ class FontFormatPanel(Widget):
         # policy. Commit the former and cancel the latter before either save
         # consumer runs.
         self.textadvancedfmt_panel.finish_pending_transform_edits()
-        for control in self.textadvancedfmt_panel.transform_controls.values():
-            control.cancel_preview()
-        # Keep programmatic preview callers safe even when no control owns the
-        # session and therefore emitted no preview_canceled signal above.
-        if self._transform_drag_before is not None:
-            self.on_text_transform_cancel(self._transform_drag_param)
+        self._cancel_text_transform_previews()
 
     def resolve_text_transform_edits_for_page_change(self):
         """End old-page transform ownership before its scene is discarded."""
@@ -795,15 +798,14 @@ class FontFormatPanel(Widget):
         # A selection transition is a transaction boundary for transform text.
         # Commit against the old target list before replacing it.
         self.textadvancedfmt_panel.finish_pending_transform_edits()
-        self.on_text_transform_cancel(self._transform_drag_param)
         if textblk_item is not None:
             transform_items = [textblk_item]
         elif multi_select:
             transform_items = SW.canvas.selected_text_items()
         else:
             transform_items = []
-        self._transform_items = transform_items
 
+        preserve_local_owner = False
         if textblk_item is None:
             focus_w = self.app.focusWidget()
             focus_on_fmtoptions = self.focusOnColorDialog or (
@@ -816,13 +818,24 @@ class FontFormatPanel(Widget):
                 and focus_on_fmtoptions
             )
             if preserve_local_owner:
-                # Selection can be momentarily empty while a format control or
-                # color dialog owns focus. Ordinary format controls keep editing
-                # the previous local item in this state; transforms must retain
-                # the same owner instead of falling through to global_format.
+                # Formatting focus can briefly clear the canvas selection; use
+                # the retained local item when comparing effective owners.
                 transform_items = [self.textblk_item]
-                self._transform_items = transform_items
-            else:
+
+        targets_changed = len(transform_items) != len(self._transform_items) or any(
+            current is not replacement
+            for current, replacement in zip(self._transform_items, transform_items)
+        )
+        if targets_changed:
+            self._cancel_text_transform_previews()
+        else:
+            # Preserve the physical press for a focus-only refresh, but clear
+            # the item-local preview and panel snapshot as before.
+            self.on_text_transform_cancel(self._transform_drag_param)
+        self._transform_items = transform_items
+
+        if textblk_item is None:
+            if not preserve_local_owner:
                 # Store the current text block's format before switching to global.
                 # This is BASE behavior and must also preserve the transform quartet.
                 if self.textblk_item is not None:

@@ -249,6 +249,18 @@ class TransformDragLabel(SmallSizeControlLabel):
         # preview after an external transaction boundary canceled it.
         self.mouse_pressed = False
 
+    def event(self, event):
+        if (
+            event.type() == QEvent.Type.ShortcutOverride
+            and self.mouse_pressed
+            and event.key() == Qt.Key.Key_Escape
+        ):
+            # The active gesture owns Escape. Prevent an ancestor window
+            # shortcut from consuming it before keyPressEvent can cancel.
+            event.accept()
+            return True
+        return super().event(event)
+
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key.Key_Escape and self.mouse_pressed:
             self.mouse_pressed = False
@@ -403,6 +415,13 @@ class CommittedTransformControl(QWidget):
 
     def eventFilter(self, watched, event):
         if watched is self.editor:
+            if (
+                event.type() == QEvent.Type.ShortcutOverride
+                and event.key() == Qt.Key.Key_Escape
+                and self.state == self.PENDING_TEXT
+            ):
+                event.accept()
+                return True
             if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
                 self.cancel_pending()
                 event.accept()

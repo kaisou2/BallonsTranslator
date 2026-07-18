@@ -130,6 +130,16 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         self.addCleanup(restore_register_view_widget)
         app_shared.register_view_widget = lambda *_args, **_kwargs: None
 
+        old_font_families = app_shared.FONT_FAMILIES
+        self.addCleanup(
+            setattr,
+            app_shared,
+            'FONT_FAMILIES',
+            old_font_families,
+        )
+        if old_font_families is None:
+            app_shared.FONT_FAMILIES = set()
+
         self.canvas = FakeCanvas()
         self.addCleanup(self.canvas.undo_stack.clear)
         old_canvas = SW.canvas
@@ -143,6 +153,7 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         def cleanup_panel():
             self.panel.close()
             self.panel.deleteLater()
+            QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
             _APP.processEvents()
 
         self.addCleanup(cleanup_panel)
@@ -463,6 +474,23 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         _APP.processEvents()
         return window, events
 
+    def make_shortcut_host(self):
+        host = QWidget()
+        self.panel.setParent(host)
+
+        def cleanup_host():
+            if self.panel.parent() is host:
+                self.panel.setParent(None)
+            host.close()
+            host.deleteLater()
+            _APP.processEvents()
+
+        self.addCleanup(cleanup_host)
+        host.show()
+        self.panel.show()
+        _APP.processEvents()
+        return host
+
     @staticmethod
     def _dispatch_close_event(mainwindow_module, window):
         event = QCloseEvent()
@@ -640,6 +668,207 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
         self.assertEqual(item.transform(), original_matrix)
         self.assertIsNone(item._text_transform_preview)
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+
+    def test_window_escape_shortcut_yields_to_held_transform_drag(self):
+        from ballontranslator.ui import mainwindow as mainwindow_module
+
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        host = self.make_shortcut_host()
+        shortcut_hits = []
+        harness = SimpleNamespace(
+            canvas=SimpleNamespace(
+                search_widget=SimpleNamespace(
+                    isVisible=lambda: False,
+                    hide=lambda: None,
+                ),
+                editing_textblkitem=None,
+            )
+        )
+
+        def activate_window_escape():
+            shortcut_hits.append('escape')
+            mainwindow_module.MainWindow.shortcutEscape(harness)
+
+        shortcut = QShortcut(QKeySequence('Escape'), host)
+        shortcut.activated.connect(activate_window_escape)
+        self.addCleanup(shortcut.deleteLater)
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        center = control.label.rect().center()
+        QTest.mousePress(
+            control.label,
+            Qt.MouseButton.LeftButton,
+            pos=center,
+        )
+        send_held_mouse_move(control.label, center + QPoint(25, 0))
+        _APP.processEvents()
+        self.assertTrue(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.DRAG_PREVIEW)
+        self.assertEqual(
+            item._effective_text_transform().horizontal_scale,
+            1.25,
+        )
+
+        QTest.keyClick(control.label, Qt.Key.Key_Escape)
+        _APP.processEvents()
+
+        self.assertEqual(shortcut_hits, [])
+        self.assertFalse(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.IDLE)
+        self.assertIsNone(item._text_transform_preview)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+
+        send_held_mouse_move(control.label, center + QPoint(40, 0))
+        QTest.mouseRelease(
+            control.label,
+            Qt.MouseButton.LeftButton,
+            pos=center + QPoint(40, 0),
+        )
+        _APP.processEvents()
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+
+        QTest.keyClick(control.label, Qt.Key.Key_Escape)
+        _APP.processEvents()
+        self.assertEqual(shortcut_hits, ['escape'])
+
+    def test_window_escape_shortcut_yields_to_pending_transform_text(self):
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        host = self.make_shortcut_host()
+        shortcut_hits = []
+        shortcut = QShortcut(QKeySequence('Escape'), host)
+        shortcut.activated.connect(lambda: shortcut_hits.append('escape'))
+        self.addCleanup(shortcut.deleteLater)
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        control.editor.setFocus()
+        control.editor.setText('150%')
+        control._on_text_edited()
+        _APP.processEvents()
+        self.assertEqual(control.state, control.PENDING_TEXT)
+
+        QTest.keyClick(control.editor, Qt.Key.Key_Escape)
+        _APP.processEvents()
+
+        self.assertEqual(shortcut_hits, [])
+        self.assertEqual(control.state, control.IDLE)
+        self.assertEqual(control.editor.text(), '100.0%')
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+
+        QTest.keyClick(control.editor, Qt.Key.Key_Escape)
+        _APP.processEvents()
+        self.assertEqual(shortcut_hits, ['escape'])
+
+    def test_select_all_shortcut_aborts_held_drag_before_target_change(self):
+        from ballontranslator.ui import mainwindow as mainwindow_module
+
+        first = make_item(horizontal=1.0, idx=0)
+        second = make_item(horizontal=1.0, idx=1)
+        self.select_one(first)
+        host = self.make_shortcut_host()
+
+        def select_all(selected):
+            self.assertTrue(selected)
+            self.canvas.selection = [first, second]
+            self.panel.set_textblk_item(None, multi_select=True)
+
+        harness = SimpleNamespace(
+            centralStackWidget=SimpleNamespace(currentIndex=lambda: 0),
+            textPanel=SimpleNamespace(isVisible=lambda: True),
+            st_manager=SimpleNamespace(set_blkitems_selection=select_all),
+        )
+        shortcut = QShortcut(QKeySequence.StandardKey.SelectAll, host)
+        shortcut.activated.connect(
+            lambda: mainwindow_module.MainWindow.shortcutSelectAll(harness)
+        )
+        self.addCleanup(shortcut.deleteLater)
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        center = control.label.rect().center()
+        QTest.mousePress(
+            control.label,
+            Qt.MouseButton.LeftButton,
+            pos=center,
+        )
+        send_held_mouse_move(control.label, center + QPoint(50, 0))
+        _APP.processEvents()
+        self.assertTrue(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.DRAG_PREVIEW)
+        self.assertEqual(
+            first._effective_text_transform().horizontal_scale,
+            1.5,
+        )
+
+        QTest.keyClick(
+            control.label,
+            Qt.Key.Key_A,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+        _APP.processEvents()
+
+        self.assertEqual(self.panel._transform_items, [first, second])
+        self.assertFalse(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.IDLE)
+        self.assertIsNone(first._text_transform_preview)
+        self.assertIsNone(second._text_transform_preview)
+        self.assertEqual(first.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(second.blk.fontformat.horizontal_scale, 1.0)
+
+        send_held_mouse_move(control.label, center + QPoint(60, 0))
+        QTest.mouseRelease(
+            control.label,
+            Qt.MouseButton.LeftButton,
+            pos=center + QPoint(60, 0),
+        )
+        _APP.processEvents()
+        self.assertEqual(first.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(second.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+
+    def test_same_owner_refresh_clears_preview_but_preserves_press_latch(self):
+        item = make_item(horizontal=1.0)
+        self.select_one(item)
+        self.panel.show()
+        control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        center = control.label.rect().center()
+        QTest.mousePress(
+            control.label,
+            Qt.MouseButton.LeftButton,
+            pos=center,
+        )
+        send_held_mouse_move(control.label, center + QPoint(50, 0))
+        _APP.processEvents()
+        self.assertTrue(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.DRAG_PREVIEW)
+        self.assertEqual(
+            item._effective_text_transform().horizontal_scale,
+            1.5,
+        )
+
+        self.canvas.selection = []
+        self.panel.set_textblk_item(None)
+        _APP.processEvents()
+
+        self.assertIs(self.panel.textblk_item, item)
+        self.assertEqual(self.panel._transform_items, [item])
+        self.assertTrue(control.label.mouse_pressed)
+        self.assertEqual(control.state, control.IDLE)
+        self.assertIsNone(item._text_transform_preview)
+        self.assertIsNone(self.panel._transform_drag_before)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
+        self.assertEqual(self.canvas.undo_stack.count(), 0)
+
+        QTest.mouseRelease(
+            control.label,
+            Qt.MouseButton.LeftButton,
+            pos=center + QPoint(50, 0),
+        )
+        _APP.processEvents()
+        self.assertFalse(control.label.mouse_pressed)
+        self.assertIsNone(item._text_transform_preview)
+        self.assertEqual(item.blk.fontformat.horizontal_scale, 1.0)
         self.assertEqual(self.canvas.undo_stack.count(), 0)
 
     def test_selection_change_commits_pending_value_to_old_target(self):
