@@ -272,7 +272,6 @@ class FontFormatPanel(Widget):
         self.app = app
         self._transform_items = []
         self._transform_drag_before = None
-        self._transform_drag_after = None
         self._transform_drag_param = None
 
         self.vlayout = QVBoxLayout(self)
@@ -566,18 +565,11 @@ class FontFormatPanel(Widget):
             ):
                 self._transform_drag_param = param_name
                 self._transform_drag_before = [self.global_format.text_transform]
-            self._transform_drag_after = [
-                self._transform_with_value(
-                    self._transform_drag_before[0],
-                    param_name,
-                    self._transform_drag_before[0][
-                        TEXT_TRANSFORM_FIELDS.index(param_name)
-                    ]
-                    + canonical_delta,
-                )
-            ]
             return
-        if self._transform_drag_param != param_name or self._transform_drag_before is None:
+        if (
+            self._transform_drag_param != param_name
+            or self._transform_drag_before is None
+        ):
             # Starting a drag must not refresh the controls: the emitting
             # control owns its cumulative display delta until release/Escape.
             # Only clear a genuinely older item preview if a different control
@@ -589,20 +581,17 @@ class FontFormatPanel(Widget):
             self._transform_drag_before = [
                 item.blk.fontformat.text_transform for item in self._transform_items
             ]
-            self._transform_drag_after = None
-        self._transform_drag_after = [
+        field_index = TEXT_TRANSFORM_FIELDS.index(param_name)
+        preview_after = [
             self._transform_with_value(
                 transform,
                 param_name,
-                transform[TEXT_TRANSFORM_FIELDS.index(param_name)]
-                + canonical_delta,
+                transform[field_index] + canonical_delta,
             )
             for transform in self._transform_drag_before
         ]
         changed_items = []
-        for item, transform in zip(
-            self._transform_items, self._transform_drag_after
-        ):
+        for item, transform in zip(self._transform_items, preview_after):
             # A drag can point farther out while the canonical value is already
             # clamped at its limit. Do not even enter the item transform path
             # unless the effective preview would actually change.
@@ -613,27 +602,34 @@ class FontFormatPanel(Widget):
         if changed_items:
             self._sync_text_transform_overlays()
 
-    def on_text_transform_drag_commit(self, param_name: str, _canonical_delta: float):
-        if self._transform_drag_param != param_name or self._transform_drag_before is None:
+    def on_text_transform_drag_commit(self, param_name: str, canonical_delta: float):
+        if (
+            self._transform_drag_param != param_name
+            or self._transform_drag_before is None
+        ):
             return
-        if not self._transform_items:
-            after = (self._transform_drag_after or self._transform_drag_before)[0]
-            before = self._transform_drag_before[0]
-            self._transform_drag_before = None
-            self._transform_drag_after = None
-            self._transform_drag_param = None
-            if before != after:
-                for name, component in zip(TEXT_TRANSFORM_FIELDS, after):
+        field_index = TEXT_TRANSFORM_FIELDS.index(param_name)
+        before = self._transform_drag_before
+        after = [
+            self._transform_with_value(
+                transform,
+                param_name,
+                transform[field_index] + canonical_delta,
+            )
+            for transform in before
+        ]
+        items = list(self._transform_items)
+        self._transform_drag_before = None
+        self._transform_drag_param = None
+        if not items:
+            global_before = before[0]
+            global_after = after[0]
+            if global_before != global_after:
+                for name, component in zip(TEXT_TRANSFORM_FIELDS, global_after):
                     setattr(self.global_format, name, component)
                 self.update_text_style_label()
             self._refresh_text_transform_controls(refresh_shape=False)
             return
-        before = self._transform_drag_before
-        after = self._transform_drag_after or before
-        items = list(self._transform_items)
-        self._transform_drag_before = None
-        self._transform_drag_after = None
-        self._transform_drag_param = None
         command = SetTextTransformCommand.create(
             items, before, after, self._refresh_text_transform_controls
         )
@@ -656,7 +652,6 @@ class FontFormatPanel(Widget):
                     item.clear_text_transform_preview() or geometry_changed
                 )
         self._transform_drag_before = None
-        self._transform_drag_after = None
         self._transform_drag_param = None
         if not self._transform_items:
             self._refresh_text_transform_controls(refresh_shape=False)

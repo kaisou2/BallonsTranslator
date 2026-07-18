@@ -551,22 +551,51 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         second = make_item(horizontal=0.8, idx=1)
         self.select_many([first, second])
         control = self.panel.textadvancedfmt_panel.horizontal_scale_control
+        releases = []
+        self.panel.textadvancedfmt_panel.transform_drag_commit_requested.connect(
+            lambda name, delta: releases.append((name, delta))
+        )
 
         control._start_drag()
         control._move_drag(4)
+        self.assertEqual(
+            (
+                first._effective_text_transform().horizontal_scale,
+                second._effective_text_transform().horizontal_scale,
+            ),
+            (1.14, 0.84),
+        )
         control._move_drag(3)
+        self.assertEqual(
+            (
+                first._effective_text_transform().horizontal_scale,
+                second._effective_text_transform().horizontal_scale,
+            ),
+            (1.17, 0.87),
+        )
         control._move_drag(-2)
+        self.assertEqual(
+            (
+                first._effective_text_transform().horizontal_scale,
+                second._effective_text_transform().horizontal_scale,
+            ),
+            (1.15, 0.85),
+        )
         self.assertEqual(first.blk.fontformat.horizontal_scale, 1.1)
         self.assertEqual(second.blk.fontformat.horizontal_scale, 0.8)
         self.assertEqual(self.canvas.undo_stack.count(), 0)
         control._finish_drag()
 
+        self.assertEqual(releases, [('horizontal_scale', 0.05)])
         self.assertEqual(first.blk.fontformat.horizontal_scale, 1.15)
         self.assertEqual(second.blk.fontformat.horizontal_scale, 0.85)
         self.assertEqual(self.canvas.undo_stack.count(), 1)
         self.canvas.undo_stack.undo()
         self.assertEqual(first.blk.fontformat.horizontal_scale, 1.1)
         self.assertEqual(second.blk.fontformat.horizontal_scale, 0.8)
+        self.canvas.undo_stack.redo()
+        self.assertEqual(first.blk.fontformat.horizontal_scale, 1.15)
+        self.assertEqual(second.blk.fontformat.horizontal_scale, 0.85)
 
     def test_noop_text_and_zero_drag_do_not_touch_item_or_undo(self):
         item = make_item(horizontal=1.2)
@@ -944,7 +973,6 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         self.assertFalse(control.label.mouse_pressed)
         self.assertEqual(control.state, control.IDLE)
         self.assertIsNone(self.panel._transform_drag_before)
-        self.assertIsNone(self.panel._transform_drag_after)
         self.assertIsNone(self.panel._transform_drag_param)
         self.assertEqual(self.canvas.undo_stack.index(), 0)
         self.assertEqual(self.canvas.undo_stack.count(), 1)
@@ -984,7 +1012,6 @@ class FontFormatPanelTransformIntegrationTest(unittest.TestCase):
         self.assertFalse(control.label.mouse_pressed)
         self.assertEqual(control.state, control.IDLE)
         self.assertIsNone(self.panel._transform_drag_before)
-        self.assertIsNone(self.panel._transform_drag_after)
         self.assertIsNone(self.panel._transform_drag_param)
         self.assertEqual(self.canvas.undo_stack.index(), 1)
         self.assertEqual(self.canvas.undo_stack.count(), 1)
