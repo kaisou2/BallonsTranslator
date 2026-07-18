@@ -809,6 +809,10 @@ class MainWindow(mainwindow_cls):
         item = self.pageList.currentItem()
         self.page_changing = True
         if item is not None:
+            if not self.opening_dir:
+                # Typed transform edits belong to the old page and must commit
+                # before its dirty check. Live drags are previews and cancel.
+                self.st_manager.formatpanel.resolve_text_transform_edits_for_page_change()
             if self.save_on_page_changed:
                 self.conditional_save()
             self.imgtrans_proj.set_current_img(item.text())

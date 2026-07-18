@@ -678,6 +678,29 @@ class FontFormatPanel(Widget):
         if self._transform_drag_before is not None:
             self.on_text_transform_cancel(self._transform_drag_param)
 
+    def resolve_text_transform_edits_for_page_change(self):
+        """End old-page transform ownership before its scene is discarded."""
+        self.resolve_text_transform_edits_for_save()
+        self._detach_text_transform_scene_owner()
+
+    def cancel_text_transform_edits_for_scene_change(self):
+        """Discard transient transform state before scene items are removed."""
+        for control in self.textadvancedfmt_panel.transform_controls.values():
+            control.cancel_pending()
+            control.cancel_preview()
+        self.on_text_transform_cancel(self._transform_drag_param)
+        self._detach_text_transform_scene_owner()
+
+    def _detach_text_transform_scene_owner(self):
+        # A format control can keep the old local owner while it has focus.
+        # Scene replacement is a real ownership boundary, so bypass that policy.
+        if self.textblk_item is not None:
+            self.textblk_item.fontformat = copy.deepcopy(C.active_format)
+        self.textblk_item = None
+        self._transform_items = []
+        self.set_active_format(self.global_format)
+        self.set_globalfmt_title()
+
     def update_text_style_label(self):
         if self.global_mode():
             active_text_style_label = self.active_text_style_label()

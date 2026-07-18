@@ -431,6 +431,7 @@ class SceneTextManager(QObject):
 
     def clearSceneTextitems(self):
         with self.text_overlay_manager.batch_update():
+            self.formatpanel.cancel_text_transform_edits_for_scene_change()
             self.hovering_transwidget = None
             self.txtblkShapeControl.setBlkItem(None)
             self.text_overlay_manager.clear()
