@@ -23,7 +23,12 @@ from qtpy.QtGui import (
     QTransform,
 )
 
-from .cursor import resizeCursorList, rotateCursorList
+from .cursor import (
+    resizeCursorList,
+    resize_handle_scene_angle,
+    rotateCursorList,
+    scene_angle_to_cursor_index,
+)
 from .textitem import TEXTRECT_SELECTED_COLOR, TEXTRECT_SHOW_COLOR, TextBlkItem
 
 
@@ -408,10 +413,15 @@ class ControlBlockItem(QGraphicsRectItem):
         return super().hoverEnterEvent(event)
 
     def hoverMoveEvent(self, event: QGraphicsSceneHoverEvent) -> None:
-        angle_idx = self.get_angle_idx(self.ctrl.handleSceneAngle(self.idx))
         if self.visible_rect.contains(event.pos()):
+            angle_idx = scene_angle_to_cursor_index(
+                self.ctrl.resizeHandleSceneAngle(self.idx)
+            )
             self.setCursor(resizeCursorList[angle_idx % 4])
         else:
+            angle_idx = scene_angle_to_cursor_index(
+                self.ctrl.handleSceneAngle(self.idx)
+            )
             self.setCursor(rotateCursorList[angle_idx])
         self.CURSOR_IDX = angle_idx
         return super().hoverMoveEvent(event)
@@ -460,16 +470,14 @@ class ControlBlockItem(QGraphicsRectItem):
             self.ctrl.resizeFromScene(self.idx, event.scenePos())
         elif self.drag_mode == self.DRAG_ROTATE:
             self.ctrl.rotateFromScene(event.scenePos(), self.rotate_start, self.idx)
-            angle_idx = self.get_angle_idx(self.ctrl.handleSceneAngle(self.idx))
+            angle_idx = scene_angle_to_cursor_index(
+                self.ctrl.handleSceneAngle(self.idx)
+            )
             if self.CURSOR_IDX != angle_idx:
                 self.setCursor(rotateCursorList[angle_idx])
                 self.CURSOR_IDX = angle_idx
             self.updateAngleLabelPos()
         event.accept()
-
-    @staticmethod
-    def get_angle_idx(angle) -> int:
-        return int((angle + 22.5) % 360 / 45)
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton and self.ctrl.blk_item is not None:
@@ -776,6 +784,12 @@ class TextBlkShapeControl(QGraphicsRectItem):
     def handleSceneAngle(self, idx: int) -> float:
         vector = self.handleScenePoint(idx) - self.visualCenterInScene()
         return math.degrees(math.atan2(vector.y(), vector.x()))
+
+    def resizeHandleSceneAngle(self, idx: int) -> float:
+        polygon = self.blk_item.visual_polygon_in_scene()
+        if len(polygon) == 4:
+            return resize_handle_scene_angle(polygon[1] - polygon[0], idx)
+        return self.rotation() + 45.0 * idx - 135.0
 
     def _beginProxyDrag(self, idx: int, pointer_scene: QPointF):
         self._proxy_drag_idx = idx
