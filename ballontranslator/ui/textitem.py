@@ -546,7 +546,8 @@ class TextBlkItem(QGraphicsTextItem):
         if self._text_transform_is_neutral():
             self._paint_neutral_stroke(painter)
             return
-        if self.fontformat.vertical:
+        active_layout = self.document().documentLayout()
+        if isinstance(active_layout, VerticalTextDocumentLayout):
             if self._effective_text_transform().glyph_slant_angle == 0.0:
                 self._paint_legacy_vertical_stroke(painter)
                 return
@@ -1831,14 +1832,13 @@ class TextBlkItem(QGraphicsTextItem):
             cursor = self.textCursor()
             cursor_pos = (cursor.position(), cursor.anchor().__pos__())
 
-        if self.fontformat is not None:
-            self.fontformat.vertical = vertical
-
         valid_layout = True
         doc = self.document()
         if self.layout is not None:
             document_margin = self.layout.documentMargin()
             if isinstance(self.layout, VerticalTextDocumentLayout) == vertical:
+                if self.fontformat is not None:
+                    self.fontformat.vertical = vertical
                 return
             self.layout.size_enlarged.disconnect(self.on_document_enlarged)
             self.layout.documentSizeChanged.disconnect(self.docSizeChanged)
@@ -1853,10 +1853,6 @@ class TextBlkItem(QGraphicsTextItem):
         
         self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         doc.documentLayout().blockSignals(True)
-        if vertical:
-            layout = VerticalTextDocumentLayout(doc, self.fontformat)
-        else:
-            layout = HorizontalTextDocumentLayout(doc, self.fontformat)
 
         # Preserve BASE writing-mode letter-spacing semantics. Glyph slant is
         # layout-only and must not rewrite the document's spacing behavior.
@@ -1870,6 +1866,18 @@ class TextBlkItem(QGraphicsTextItem):
         self.set_cursor_cfmt(cursor, char_fmt, True)
         cursor.endEditBlock()
 
+        # QTextCursor formatting emits contentsChanged synchronously while the
+        # old layout is still attached. Keep the writing-mode flag aligned with
+        # that layout until the formatting transaction has finished, otherwise
+        # effect repaint can enter the new vertical-only stroke path through an
+        # old horizontal layout.
+        if self.fontformat is not None:
+            self.fontformat.vertical = vertical
+
+        if vertical:
+            layout = VerticalTextDocumentLayout(doc, self.fontformat)
+        else:
+            layout = HorizontalTextDocumentLayout(doc, self.fontformat)
         self.layout = layout
         layout.glyph_raster_failure_handler = (
             self._on_glyph_raster_failure
