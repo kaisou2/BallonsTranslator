@@ -1,0 +1,57 @@
+name: Long text layout validation
+on:
+  push:
+    branches: ['validation/long-text-layout-20260905']
+permissions:
+  contents: read
+jobs:
+  qt:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        qt-api: [pyqt5, pyqt6]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QT_API: ${{ matrix.qt-api }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install UI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 fonts-dejavu-core fonts-noto-cjk
+          python -m pip install -r requirements.txt
+          if [ "$QT_API" = pyqt5 ]; then python -m pip install 'PyQt5>=5.15.10'; fi
+      - name: Check syntax and targeted regressions
+        run: |
+          mkdir -p validation-results
+          python -m py_compile ballontranslator/ui/text_engine/layout.py ballontranslator/ui/text_engine/horizontal_layout.py tests/test_text_layout_performance.py scripts/benchmark_text_layout.py
+          git diff --check eb1ea69180abddf6dd665718bb5ae154d156ac5d HEAD
+          status=0
+          for pattern in test_text_layout_performance.py test_horizontal_whitespace.py test_rich_text_annotations.py test_ruby_furigana.py 'test_vertical_*.py' test_text_transform_undo.py; do
+            python -m unittest discover -s tests -p "$pattern" -v > "validation-results/${pattern//\*/all}.log" 2>&1 || status=1
+            cat "validation-results/${pattern//\*/all}.log"
+          done
+          exit "$status"
+      - name: Compare offscreen timings
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p validation-results
+          git worktree add --detach "$RUNNER_TEMP/before" eb1ea69180abddf6dd665718bb5ae154d156ac5d
+          python scripts/benchmark_text_layout.py --samples 5 --chars 1000 5000 --output "$GITHUB_WORKSPACE/validation-results/after.json"
+          python scripts/benchmark_text_layout.py --repo-root "$RUNNER_TEMP/before" --samples 5 --chars 1000 5000 --output "$GITHUB_WORKSPACE/validation-results/before.json"
+          python scripts/benchmark_text_layout.py --vertical --samples 3 --chars 1000 --output "$GITHUB_WORKSPACE/validation-results/after-vertical.json"
+          python scripts/benchmark_text_layout.py --repo-root "$RUNNER_TEMP/before" --vertical --samples 3 --chars 1000 --output "$GITHUB_WORKSPACE/validation-results/before-vertical.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: long-text-${{ matrix.qt-api }}
+          path: validation-results/
+          if-no-files-found: warn
