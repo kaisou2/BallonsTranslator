@@ -15,6 +15,8 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
       QT_API: ${{ matrix.qt-api }}
+      BASE: eb1ea69180abddf6dd665718bb5ae154d156ac5d
+      CANDIDATE: a62fc26891cccc1ccf787a2753657f41f99a5c43
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,26 +31,63 @@ jobs:
           sudo apt-get install -y libegl1 libgl1 fonts-dejavu-core fonts-noto-cjk
           python -m pip install -r requirements.txt
           if [ "$QT_API" = pyqt5 ]; then python -m pip install 'PyQt5>=5.15.10'; fi
-      - name: Check syntax and targeted regressions
+      - name: Record source evidence and create baseline worktree
         run: |
-          mkdir -p validation-results
-          python -m py_compile ballontranslator/ui/text_engine/layout.py ballontranslator/ui/text_engine/horizontal_layout.py tests/test_text_layout_performance.py scripts/benchmark_text_layout.py
-          git diff --check eb1ea69180abddf6dd665718bb5ae154d156ac5d HEAD
+          mkdir -p validation-results/before validation-results/after
+          git worktree add --detach "$RUNNER_TEMP/before" "$BASE"
+          git diff --binary "$BASE" "$CANDIDATE" > validation-results/ballons_text_performance.diff
+          git archive --format=tar "$BASE" ballontranslator/ui/text_engine/layout.py ballontranslator/ui/text_engine/horizontal_layout.py > validation-results/baseline-source.tar
+          git archive --format=tar "$CANDIDATE" ballontranslator/ui/text_engine/layout.py ballontranslator/ui/text_engine/horizontal_layout.py tests/test_text_layout_performance.py scripts/benchmark_text_layout.py > validation-results/patched-source.tar
+          git show "$BASE:LICENSE" > validation-results/LICENSE || true
+          git diff --check "$BASE" "$CANDIDATE"
+          python -m pip freeze > validation-results/environment.txt
+          printf 'baseline=%s\ncandidate=%s\nvalidation=%s\n' "$BASE" "$CANDIDATE" "$(git rev-parse HEAD)" > validation-results/refs.txt
+      - name: Baseline and candidate regression tests
+        run: |
           status=0
-          for pattern in test_text_layout_performance.py test_horizontal_whitespace.py test_rich_text_annotations.py test_ruby_furigana.py 'test_vertical_*.py' test_text_transform_undo.py; do
-            python -m unittest discover -s tests -p "$pattern" -v > "validation-results/${pattern//\*/all}.log" 2>&1 || status=1
-            cat "validation-results/${pattern//\*/all}.log"
+          python -m unittest discover -s tests -p test_text_layout_performance.py -v > validation-results/after/test_text_layout_performance.py.log 2>&1 || status=1
+          cat validation-results/after/test_text_layout_performance.py.log
+          for pattern in test_horizontal_whitespace.py test_rich_text_annotations.py test_ruby_furigana.py 'test_vertical_*.py' test_text_transform_undo.py; do
+            logfile="${pattern//\*/all}.log"
+            (cd "$RUNNER_TEMP/before" && python -m unittest discover -s tests -p "$pattern" -v) > "validation-results/before/$logfile" 2>&1 || status=1
+            python -m unittest discover -s tests -p "$pattern" -v > "validation-results/after/$logfile" 2>&1 || status=1
+            cat "validation-results/before/$logfile"
+            cat "validation-results/after/$logfile"
           done
           exit "$status"
       - name: Compare offscreen timings
         if: ${{ !cancelled() }}
         run: |
-          mkdir -p validation-results
-          git worktree add --detach "$RUNNER_TEMP/before" eb1ea69180abddf6dd665718bb5ae154d156ac5d
-          python scripts/benchmark_text_layout.py --samples 5 --chars 1000 5000 --output "$GITHUB_WORKSPACE/validation-results/after.json"
-          python scripts/benchmark_text_layout.py --repo-root "$RUNNER_TEMP/before" --samples 5 --chars 1000 5000 --output "$GITHUB_WORKSPACE/validation-results/before.json"
-          python scripts/benchmark_text_layout.py --vertical --samples 3 --chars 1000 --output "$GITHUB_WORKSPACE/validation-results/after-vertical.json"
-          python scripts/benchmark_text_layout.py --repo-root "$RUNNER_TEMP/before" --vertical --samples 3 --chars 1000 --output "$GITHUB_WORKSPACE/validation-results/before-vertical.json"
+          python scripts/benchmark_text_layout.py --repo-root "$RUNNER_TEMP/before" --samples 9 --chars 1000 5000 --output "$GITHUB_WORKSPACE/validation-results/before.json"
+          python scripts/benchmark_text_layout.py --samples 9 --chars 1000 5000 --output "$GITHUB_WORKSPACE/validation-results/after.json"
+          python scripts/benchmark_text_layout.py --repo-root "$RUNNER_TEMP/before" --vertical --samples 5 --chars 1000 --output "$GITHUB_WORKSPACE/validation-results/before-vertical.json"
+          python scripts/benchmark_text_layout.py --vertical --samples 5 --chars 1000 --output "$GITHUB_WORKSPACE/validation-results/after-vertical.json"
+      - name: Profile edit and undo hot paths
+        if: ${{ !cancelled() }}
+        run: |
+          python - <<'PY'
+          import cProfile, pstats, sys
+          sys.path.insert(0, 'tests')
+          from test_text_layout_performance import make_item
+          from qtpy.QtGui import QTextCursor
+          from qtpy.QtWidgets import QApplication
+          app = QApplication.instance() or QApplication([])
+          item = make_item(('Long text 한글 日本語 😀 abcdefghijklmnop ' * 160)[:5000])
+          doc = item.document()
+          cursor = QTextCursor(doc)
+          cursor.movePosition(QTextCursor.MoveOperation.End)
+          profiler = cProfile.Profile()
+          profiler.enable()
+          for _ in range(20):
+              cursor.insertText('x')
+              app.processEvents()
+              doc.undo()
+              app.processEvents()
+          profiler.disable()
+          profiler.dump_stats('validation-results/edit-profile.pstats')
+          with open('validation-results/edit-profile.txt', 'w') as output:
+              pstats.Stats(profiler, stream=output).sort_stats('cumulative').print_stats(60)
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:

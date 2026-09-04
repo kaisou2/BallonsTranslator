@@ -111,7 +111,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         self,
         block: QTextBlock,
         line: QTextLine,
-        text: str,
+        text: Optional[str] = None,
     ) -> Tuple[int, List[Tuple[int, float]]]:
         """Return the content end and trailing spaces that need relocation.
 
@@ -123,6 +123,8 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         >>> callable(HorizontalTextDocumentLayout._trailing_space_layout)
         True
         """
+        if text is None:
+            text = block.text()
         line_start = line.textStart()
         line_length = line.textLength()
         line_end = line_start + line_length
@@ -468,11 +470,13 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         block: QTextBlock,
         line: QTextLine,
         metrics: RubyBlockMetrics,
-        text: str,
+        text: Optional[str] = None,
     ) -> None:
         """Fit complete Ruby cells without retrying QTextLine widths."""
         if not metrics:
             return
+        if text is None:
+            text = block.text()
         line_start = line.textStart()
         line_end = min(
             line_start + line.textLength(), _utf16_length(text)
