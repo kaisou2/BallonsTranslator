@@ -714,7 +714,7 @@ class RubyFuriganaTest(unittest.TestCase):
             wraps=item.layout._cursor_x,
         ) as cursor_x:
             item.layout._settle_horizontal_ruby_wrap(
-                block, line, item.layout._ruby_metrics[0]
+                block, line, item.layout._ruby_metrics[0], block.text()
             )
         queried = [call.args[-1] for call in cursor_x.call_args_list]
         self.assertEqual(queried, [0, 2, 4, 5])
@@ -752,7 +752,7 @@ class RubyFuriganaTest(unittest.TestCase):
                     wraps=item.layout._cursor_x,
                 ) as cursor_x:
                     item.layout._settle_horizontal_ruby_wrap(
-                        block, line, item.layout._ruby_metrics[0]
+                        block, line, item.layout._ruby_metrics[0], block.text()
                     )
                 self.assertLessEqual(cursor_x.call_count, count + 1)
                 original = type(item.layout).fragment_format_ranges

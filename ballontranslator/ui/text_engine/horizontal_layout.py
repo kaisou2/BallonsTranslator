@@ -111,6 +111,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         self,
         block: QTextBlock,
         line: QTextLine,
+        text: str,
     ) -> Tuple[int, List[Tuple[int, float]]]:
         """Return the content end and trailing spaces that need relocation.
 
@@ -122,7 +123,6 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         >>> callable(HorizontalTextDocumentLayout._trailing_space_layout)
         True
         """
-        text = block.text()
         line_start = line.textStart()
         line_length = line.textLength()
         line_end = line_start + line_length
@@ -468,11 +468,14 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         block: QTextBlock,
         line: QTextLine,
         metrics: RubyBlockMetrics,
+        text: str,
     ) -> None:
         """Fit complete Ruby cells without retrying QTextLine widths."""
+        if not metrics:
+            return
         line_start = line.textStart()
         line_end = min(
-            line_start + line.textLength(), _utf16_length(block.text())
+            line_start + line.textLength(), _utf16_length(text)
         )
         line_metrics = metrics.overlapping(
             block.position() + line_start,
@@ -483,7 +486,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         candidate_ends = tuple(
             line_start + end
             for _start, end in _grapheme_ranges(_utf16_slice(
-                block.text(), line_start, line_end - line_start
+                text, line_start, line_end - line_start
             ))
         )
         left = right = self._cursor_x(line, line_start)
@@ -915,6 +918,10 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
         doc = self.document()
         block.clearLayout()
         tl = block.layout()
+        # A single immutable snapshot avoids copying/hashing the full Qt block
+        # again for every wrapped line. It lives only for this layout pass.
+        block_text = block.text()
+        block_text_length = _utf16_length(block_text)
 
         ruby_metrics = prepare_horizontal_ruby_layout(block)
         self._ruby_metrics.append(ruby_metrics)
@@ -978,22 +985,17 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
                 shared_space_row = None
                 line.setLineWidth(self.available_width)
             protect_horizontal_ruby_wrap(block, line, ruby_metrics)
-            self._settle_horizontal_ruby_wrap(block, line, ruby_metrics)
+            self._settle_horizontal_ruby_wrap(
+                block, line, ruby_metrics, block_text
+            )
             nchar = line.textLength()
 
             dy = 0
             idea_height = -1
             if nchar > 0:
-                tgt_cfmt = None
-                tgt_size = -1
-                for ii in range(nchar):
-                    cfmt = self.get_char_fontfmt(blk_no, char_idx + ii)
-                    if cfmt is None:
-                        break
-                    sz = cfmt.font.pointSizeF()
-                    if sz > tgt_size:
-                        tgt_size = sz
-                        tgt_cfmt = cfmt
+                tgt_cfmt = self.largest_font_format(
+                    blk_no, char_idx, char_idx + nchar
+                )
                 if tgt_cfmt is not None:
                     font = tgt_cfmt.font
                     tbr, br = get_punc_rect('木fg', font.family(), font.pointSizeF(), font.weight(), font.italic())
@@ -1027,7 +1029,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             line_y_offset += over_margin
             line.setPosition(QPointF(doc_margin, line_y_offset + dy))
             relocated_start, relocated_spaces = self._trailing_space_layout(
-                block, line
+                block, line, block_text
             )
             if shared_space_row is not None:
                 self._merge_line_into_space_row(
@@ -1081,7 +1083,7 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
             last_row_advance = line_advance
             if (
                 relocated_spaces
-                and char_idx + nchar < _utf16_length(block.text())
+                and char_idx + nchar < block_text_length
             ):
                 # At a soft-wrap boundary Qt owns the shared cursor position
                 # before the following visible glyph. Intermediate spaces and
