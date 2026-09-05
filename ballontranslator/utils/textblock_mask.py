@@ -218,7 +218,18 @@ def canny_flood(img, show_process=False, inpaint_sdthresh=10, **kwargs):
     return mask, ballon_mask, bub_dict
 
 # 输入：文本块roi，分割出文本mask，根据mask计算文本bgr均值和标准差，决定纯色覆盖/inpaint修复
-def connected_canny_flood(img, show_process=False, inpaint_sdthresh=10, apply_strokewidth_check=0, **kwargs):
+def connected_canny_flood(
+    img: np.ndarray, show_process: bool = False, inpaint_sdthresh: float = 10,
+    apply_strokewidth_check: int = 0, **kwargs,
+) -> Tuple[np.ndarray, np.ndarray, dict]:
+    """Segment text and return its mask, balloon mask and color metadata.
+
+    >>> image = np.full((64, 64, 3), 255, dtype=np.uint8)
+    >>> image[24:40, 28:36] = 0
+    >>> mask, balloon, _ = connected_canny_flood(image)
+    >>> mask.shape == balloon.shape == image.shape[:2]
+    True
+    """
 
     # Handle RGBA images by converting to RGB for processing
     if len(img.shape) == 3 and img.shape[2] == 4:
@@ -316,13 +327,12 @@ def connected_canny_flood(img, show_process=False, inpaint_sdthresh=10, apply_st
         thresh = 255 - thresh
     num_labels, labels, stats, centroids, ballon_mask = find_outermask(thresh)
     img_area = img.shape[0] * img.shape[1]
-    text_mask = np.zeros((img.shape[0], img.shape[1]), np.uint8)
-    max_ind = np.argmax(stats[:, 4])
-    for lab in (range(num_labels)):
-        stat = stats[lab]
-        if lab != max_ind and stat[4] < img_area * 0.4:
-            labcord = np.where(labels==lab)
-            text_mask[labcord] = 255
+    # Decide once per label, then map pixels in one pass instead of N scans.
+    label_values = np.zeros(num_labels, dtype=np.uint8)
+    label_values[stats[:, cv2.CC_STAT_AREA] < img_area * 0.4] = 255
+    # Keep the original largest-label rule, including argmax's first-tie choice.
+    label_values[np.argmax(stats[:, cv2.CC_STAT_AREA])] = 0
+    text_mask = label_values[labels]
 
     text_mask = cv2.bitwise_and(text_mask, ballon_mask)
     if apply_strokewidth_check > 0:
