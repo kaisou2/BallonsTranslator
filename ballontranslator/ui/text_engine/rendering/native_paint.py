@@ -106,6 +106,24 @@ def _draw_path_in_strips(painter: QPainter, path: QPainterPath) -> None:
     ):
         painter.drawPath(path)
         return
+    pen_width = pen.widthF()
+    smallest_device_width = (
+        pen_width if pen.isCosmetic()
+        else pen_width * min(abs(transform.m11()), abs(transform.m22()))
+    )
+    if (
+        pen.style() != Qt.PenStyle.NoPen
+        and smallest_device_width <= 1.0
+        and pen.brush().style() != Qt.BrushStyle.NoBrush
+        and (
+            pen.brush().style() != Qt.BrushStyle.SolidPattern
+            or pen.color().alpha() != 0
+        )
+    ):
+        # Separately clipped draws change Qt's thin-stroke coverage throughout
+        # the run. Transparent alignment outlines still accelerate native fill.
+        painter.drawPath(path)
+        return
     inverse, invertible = transform.inverted()
     if not invertible:
         painter.drawPath(path)
@@ -122,7 +140,6 @@ def _draw_path_in_strips(painter: QPainter, path: QPainterPath) -> None:
     if width <= 0 or height <= 0:
         painter.drawPath(path)
         return
-    pen_width = pen.widthF()
     if pen.isCosmetic():
         pen_width = max(1.0, pen_width)
     else:
@@ -175,8 +192,10 @@ class _NativePathEngine(QPaintEngine):
     True
     """
 
-    def __init__(self, painter: QPainter) -> None:
+    def __init__(self, painter: QPainter, probing: bool = False) -> None:
         super().__init__(QPaintEngine.PaintEngineFeature.AllFeatures)
+        self.probing = probing
+        self.has_text_items = False
         self.painter = painter
         self.proxy: Optional[QPainter] = None
         world_inverse, _ = painter.worldTransform().inverted()
@@ -193,6 +212,8 @@ class _NativePathEngine(QPaintEngine):
         return QPaintEngine.Type.User
 
     def updateState(self, state: QPaintEngineState) -> None:
+        if self.probing:
+            return
         flags = state.state()
         dirty = QPaintEngine.DirtyFlag
         clip_changed = flags & (
@@ -229,21 +250,29 @@ class _NativePathEngine(QPaintEngine):
             )
 
     def drawPath(self, path: QPainterPath) -> None:
+        if self.probing:
+            return
         _draw_path_in_strips(self.painter, path)
 
     def drawPixmap(self, rect: QRectF, pixmap: QPixmap, source: QRectF) -> None:
+        if self.probing:
+            return
         self.painter.drawPixmap(rect, pixmap, source)
 
     def drawImage(
         self, rect: QRectF, image: QImage, source: QRectF,
         flags: Qt.ImageConversionFlag = Qt.ImageConversionFlag.AutoColor,
     ) -> None:
+        if self.probing:
+            return
         self.painter.drawImage(rect, image, source, flags)
 
     def drawPolygon(
         self, points: Iterable[Union[QPoint, QPointF]],
         mode: QPaintEngine.PolygonDrawMode,
     ) -> None:
+        if self.probing:
+            return
         if mode == QPaintEngine.PolygonDrawMode.PolylineMode:
             self.painter.drawPolyline(points)
         else:
@@ -255,20 +284,26 @@ class _NativePathEngine(QPaintEngine):
             self.painter.drawPolygon(points, rule)
 
     def drawRects(self, rectangles: Iterable[Union[QRect, QRectF]]) -> None:
+        if self.probing:
+            return
         self.painter.drawRects(rectangles)
 
     def drawLines(self, lines: Iterable[Union[QLine, QLineF]]) -> None:
+        if self.probing:
+            return
         self.painter.drawLines(lines)
 
     def drawTextItem(self, point: QPointF, item: QTextItem) -> None:
-        self.painter.drawTextItem(point, item)
+        # The dry run detects native glyph items before any target paint.
+        # PyQt cannot forward them through QPainter without changing rendering.
+        self.has_text_items = True
 
 
 class _NativePathDevice(QPaintDevice):
-    def __init__(self, painter: QPainter) -> None:
+    def __init__(self, painter: QPainter, probing: bool = False) -> None:
         super().__init__()
         self.target = painter.device()
-        self.engine = _NativePathEngine(painter)
+        self.engine = _NativePathEngine(painter, probing)
 
     def paintEngine(self) -> QPaintEngine:
         return self.engine
@@ -321,6 +356,8 @@ def draw_native_layout(
         or not isinstance(device, (QImage, QPixmap))
         or not transform.isInvertible()
         or painter.viewTransformEnabled()
+        or bool(selections)
+        or bool(layout.preeditAreaText())
     ):
         layout.draw(painter, QPointF(), selections, clip)
         return
@@ -332,17 +369,40 @@ def draw_native_layout(
     hints = painter.renderHints()
     opacity = painter.opacity()
     composition = painter.compositionMode()
-    painter.save()
-    device = _NativePathDevice(painter)
-    proxy = QPainter(device)
-    device.engine.proxy = proxy
-    try:
-        proxy.setWorldTransform(transform)
-        proxy.setRenderHints(hints)
-        proxy.setOpacity(opacity)
-        proxy.setCompositionMode(composition)
-        layout.draw(proxy, QPointF(), selections, clip)
-    finally:
-        proxy.end()
-        device.engine.proxy = None
-        painter.restore()
+    pen = painter.pen()
+    brush = painter.brush()
+    font = painter.font()
+    brush_origin = painter.brushOrigin()
+    background = painter.background()
+    background_mode = painter.backgroundMode()
+    # Additional formats and selections can remove an outline on just part of
+    # a shaped run. Let Qt resolve those formats in a dry paint: if it emits any
+    # native glyph items, draw the whole layout directly, preserving hinting and
+    # color glyphs without partially painting the destination first.
+    # These synchronous passes share unchanged layout and painter state, so Qt
+    # emits the same primitives; only a path-only probe reaches the paint pass.
+    for probing in (True, False):
+        painter.save()
+        device = _NativePathDevice(painter, probing)
+        proxy = QPainter(device)
+        device.engine.proxy = proxy
+        try:
+            proxy.setWorldTransform(transform)
+            proxy.setPen(pen)
+            proxy.setBrush(brush)
+            proxy.setFont(font)
+            proxy.setBrushOrigin(brush_origin)
+            proxy.setBackground(background)
+            proxy.setBackgroundMode(background_mode)
+            proxy.setRenderHints(proxy.renderHints(), False)
+            proxy.setRenderHints(hints)
+            proxy.setOpacity(opacity)
+            proxy.setCompositionMode(composition)
+            layout.draw(proxy, QPointF(), selections, clip)
+        finally:
+            proxy.end()
+            device.engine.proxy = None
+            painter.restore()
+        if probing and device.engine.has_text_items:
+            layout.draw(painter, QPointF(), selections, clip)
+            return

@@ -27,7 +27,7 @@ def _long_layout() -> QTextLayout:
     format_range = QTextLayout.FormatRange()
     format_range.start, format_range.length = 0, 240
     format_range.format.setForeground(QColor('black'))
-    format_range.format.setTextOutline(QPen(QColor('black'), 1.0))
+    format_range.format.setTextOutline(QPen(QColor('black'), 2.0))
     layout.setFormats([format_range])
     layout.beginLayout()
     line = layout.createLine()
