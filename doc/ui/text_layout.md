@@ -136,10 +136,15 @@ Foreground and effect layouts must reuse the same settled offsets. Caches tied
 to placement must be invalidated with the layout generation and must not retain
 records from a replaced document layout.
 
-Long horizontal native-outline lines use `rendering/native_paint.py` to bound
-path rasterization while retaining Qt's shaped contours. Short wrapped lines
-stay on direct Qt drawing. The helper owns only transient painter forwarding
-and bounded contour reuse; it must not reshape text or alter document state.
+Long horizontal native-outline lines use `rendering/native_paint.py` on
+independent QImage/QPixmap surfaces to bound path rasterization while retaining
+Qt's shaped contours. Widget painters, additional device transforms, and short
+wrapped lines stay on direct Qt drawing. A widget's backing-store offset and
+logical device size must never be treated as an independent raster's geometry.
+The helper owns only transient painter forwarding and bounded contour reuse;
+it must not reshape text or alter document state. Screen regression checks must
+capture the parent window with an offset child viewport: grabbing only the
+viewport can remove the device offset and hide a foreground/effect mismatch.
 See [Long-text performance](../performance/long_text.md) for measurement and
 output-equivalence coverage.
 

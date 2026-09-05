@@ -18,6 +18,7 @@ from qtpy.QtGui import (
     QRegion,
     QTextItem,
     QTextLayout,
+    QTransform,
 )
 
 
@@ -301,20 +302,31 @@ def draw_native_layout(
     selections: Sequence[QTextLayout.FormatRange],
     clip: QRectF,
 ) -> None:
-    """Keep native shaping while bounding the cost of long horizontal paths.
+    """Bound long horizontal paths on independent raster surfaces.
 
-    Stroke-aligned fill, cloned outlines, and editing feedback share this
-    transient device. It changes neither the document nor raster cache keys.
+    Stroke-aligned fill and cloned outlines share this transient raster device.
+    Widget painting keeps Qt's native device geometry. The document and raster
+    cache keys retain their existing ownership.
 
     >>> callable(draw_native_layout)
     True
     """
+    device = painter.device()
     transform = painter.worldTransform()
+    # Widget painters carry backing-store offsets and logical device sizes that
+    # this raster proxy does not share. Qt must own their complete screen paint,
+    # including redirected captures and high-DPI clipping.
     if (
         not painter.isActive()
+        or not isinstance(device, (QImage, QPixmap))
         or not transform.isInvertible()
         or painter.viewTransformEnabled()
     ):
+        layout.draw(painter, QPointF(), selections, clip)
+        return
+    ratio = device.devicePixelRatioF()
+    expected_device_transform = transform * QTransform.fromScale(ratio, ratio)
+    if painter.deviceTransform() != expected_device_transform:
         layout.draw(painter, QPointF(), selections, clip)
         return
     hints = painter.renderHints()
