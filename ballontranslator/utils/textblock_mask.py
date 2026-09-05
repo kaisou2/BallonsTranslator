@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from typing import Tuple
+from typing import Optional, Tuple
 from .imgproc_utils import draw_connected_labels
 from .stroke_width_calculator import strokewidth_check
 
@@ -379,11 +379,18 @@ def region_mask(img, mask: np.ndarray):
     return msk, msk, bub_dict
 
 
-def extract_ballon_mask(img: np.ndarray, mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    '''
-    Given original img and text mask (cropped)
-    return ballon mask & non text mask
-    '''
+def extract_ballon_mask(
+    img: np.ndarray, mask: np.ndarray,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Return the smallest containing balloon and its non-text mask, or None.
+
+    >>> image = np.full((64, 64, 3), 255, dtype=np.uint8)
+    >>> text = np.zeros(image.shape[:2], dtype=np.uint8)
+    >>> text[28:36, 28:36] = 255
+    >>> balloon, background = extract_ballon_mask(image, text)
+    >>> bool(np.all(background[text == 255] == 0))
+    True
+    """
     # Handle RGBA images by converting to RGB for processing
     if len(img.shape) == 3 and img.shape[2] == 4:
         img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
@@ -412,13 +419,15 @@ def extract_ballon_mask(img: np.ndarray, mask: np.ndarray) -> Tuple[np.ndarray, 
         br_c = [br_c[0], br_c[1], br_c[0] + br_c[2], br_c[1] + br_c[3]]
         if br_c[0] > br_xyxy[0] or br_c[1] > br_xyxy[1] or br_c[2] < br_xyxy[2] or br_c[3] < br_xyxy[3]:
             continue
+        con_area = cv2.contourArea(con)
+        # Larger or equal contours cannot win; avoid allocating and scanning a mask.
+        if con_area >= min_ballon_area:
+            continue
         tmp = np.zeros_like(cannyed)
         cv2.drawContours(tmp, cons, ii, (255, 255, 255), -1, cv2.LINE_8)
         if cv2.bitwise_and(tmp, mask).sum() >= text_sum:
-            con_area = cv2.contourArea(con)
-            if con_area < min_ballon_area:
-                min_ballon_area = con_area
-                ballon_mask = tmp
+            min_ballon_area = con_area
+            ballon_mask = tmp
     if ballon_mask is not None:
         non_text_mask = cv2.bitwise_and(ballon_mask, 255 - mask)
     #     cv2.imshow('ballon', ballon_mask)
