@@ -219,6 +219,14 @@ native and cheap. Batch previews and transient formatting so they refresh once
 when settled. Optional acceleration must preserve the working fallback's
 coordinates, rounding, and output, and must not compile on the Qt thread.
 
+Saved-text construction keeps document signals and layout live while restoring
+HTML, annotations, and the initial cursor, then rasterizes effects once after
+those changes settle. Do not rebuild effect surfaces for intermediate import
+states. Fragment lookup uses layout-generation-owned UTF-16 format-run ends;
+line metrics visit intersecting runs, and horizontal reflow shares one paragraph
+text snapshot. See [Long-text performance](../performance/long_text.md) for
+the benchmark and verification scope.
+
 Dynamic Text Effect and Text Transform cards keep their natural height inside
 `PanelArea.scrollContent`. Their panels may advertise a capped, content-driven
 preferred height, but must not raise their minimum height with that content;
