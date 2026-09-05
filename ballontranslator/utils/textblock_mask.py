@@ -77,7 +77,18 @@ def textrgb_calculator(img, text_mask, show_process=False):
     return overall_meanrgb.astype(np.uint8)
 
 # 计算背景rgb均值和标准差
-def bground_calculator(buble_img, back_ground_mask, dilate=True):
+def bground_calculator(
+    buble_img: np.ndarray, back_ground_mask: np.ndarray, dilate: bool = True,
+) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray], float]:
+    """Return RGB mean, pixel indices and grayscale variance outside the mask.
+
+    The final value is variance, despite the historical name ``sd``.
+
+    >>> img = np.full((2, 2, 3), 10, dtype=np.uint8)
+    >>> mean, _, variance = bground_calculator(img, np.zeros((2, 2), np.uint8))
+    >>> mean.tolist(), float(variance)
+    ([10, 10, 10], 0.0)
+    """
     kernel = np.ones((3,3),np.uint8)
     if dilate:
         back_ground_mask = cv2.dilate(back_ground_mask, kernel, iterations = 1)
@@ -86,7 +97,6 @@ def bground_calculator(buble_img, back_ground_mask, dilate=True):
     if len(bground_region[0]) != 0:
         pix_array = buble_img[bground_region]
         bground_aver = np.mean(pix_array, axis=0).astype(int)
-        pix_array - bground_aver
         gray = cv2.cvtColor(buble_img, cv2.COLOR_RGB2GRAY)
         gray_pixarray = gray[bground_region]
         gray_aver = np.mean(gray_pixarray)
