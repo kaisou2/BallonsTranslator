@@ -34,6 +34,7 @@ from .rendering.indexing import (
     _utf16_slice,
 )
 from .rendering.glyph import draw_slanted_line
+from .rendering.native_paint import draw_native_layout
 from .rendering.ruby import (
     RubyBlockMetrics,
     RubyPlacement,
@@ -1183,7 +1184,24 @@ class HorizontalTextDocumentLayout(SceneTextLayout):
                             ruby_context,
                         )
                 else:
-                    layout.draw(painter, QPointF(0, 0), selections, clip)
+                    native_outline = bllen >= 128 and (
+                        self._is_painting_stroke
+                        or any(
+                            entry.format.textOutline().style() != Qt.PenStyle.NoPen
+                            for entry in layout.formats()
+                        )
+                    )
+                    # Short wrapped lines already rasterize cheaply. Forwarding
+                    # an entire long paragraph through the path engine adds
+                    # overhead unless a shaped line itself contains many units.
+                    long_native_line = native_outline and any(
+                        layout.lineAt(index).textLength() >= 128
+                        for index in range(layout.lineCount())
+                    )
+                    if long_native_line:
+                        draw_native_layout(layout, painter, selections, clip)
+                    else:
+                        layout.draw(painter, QPointF(), selections, clip)
             else:
                 if context.clip.isValid():
                     painter.save()

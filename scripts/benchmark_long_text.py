@@ -7,8 +7,9 @@ Run from a checkout with the application's existing dependencies installed::
 
 Set QT_API=pyqt5 or QT_API=pyqt6 before running to compare bindings. The
 optional project is opened read-only; neither its text nor its path appears in
-the report. No page images, models, or network services are loaded. Timings are
-offscreen Qt measurements, not full application page-switch latency.
+the report. No page images, models, or network services are loaded. Use --native
+for the desktop font backend; the default is offscreen Qt. Both modes measure
+individual text items and exclude the complete application page-switch path.
 """
 
 from __future__ import annotations
@@ -36,6 +37,10 @@ def parse_arguments() -> argparse.Namespace:
         default='all', help='Synthetic fixture; ignored with --project-json.',
     )
     parser.add_argument('--font', default='Malgun Gothic')
+    parser.add_argument(
+        '--native', action='store_true',
+        help='Use the desktop platform/font backend instead of offscreen Qt.',
+    )
     parser.add_argument('--project-json', type=Path)
     parser.add_argument('--page', type=int, default=16, help='One-based page.')
     parser.add_argument(
@@ -67,7 +72,10 @@ def elapsed_ms(action: Callable[[], object]) -> float:
 
 def main() -> None:
     arguments = parse_arguments()
-    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    if arguments.native:
+        os.environ.pop('QT_QPA_PLATFORM', None)
+    else:
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     sys.path.insert(0, str(arguments.source_root.resolve()))
 
     import qtpy
@@ -157,7 +165,7 @@ def main() -> None:
             'platform': platform.platform(),
             'binding': qtpy.API_NAME,
             'qt': qVersion(),
-            'qpa': os.environ.get('QT_QPA_PLATFORM'),
+            'qpa': app.platformName(),
         },
         'repeat': arguments.repeat,
         'viewport_pixels': [1200, 1800],

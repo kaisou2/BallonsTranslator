@@ -1,94 +1,124 @@
 # Long-text performance
 
-The benchmark covers saved-text construction, offscreen scene painting, and
-local character insertion. It does not run OCR, translation, image loading,
-or the complete application page-switch workflow.
+Measure page-switch latency through the desktop application's real caller chain.
+The isolated item benchmark also supports the desktop font backend with
+`--native`; its default offscreen backend can substantially underestimate native
+outline cost and excludes page images, paired editors, and automatic saving.
 
-## Measurement
+## Desktop page transition
 
-Measured on Windows, Python 3.10.6, Qt 6.11.1 / Qt 5.15.2, against upstream
-`682c752` (v1.5.14). Values below are medians of three warm construction runs,
-including fresh TextBlock/TextBlkItem creation. Existing font and Qt caches
-remain warm, as on repeated page navigation. Timings vary with fonts and hardware.
+Measured on Windows 10, Python 3.10.6, PyQt6 / Qt 6.11.1. The comparison baseline
+is `8b28633`, which already batches saved-text effects and indexes layout by
+format run. Runs use fresh application processes with the same dependencies,
+fonts, configuration, and copied project. Ranges include the comparison runs
+and final verification; timings vary with desktop/widget work as well as text.
 
-| Fixture | Qt | Before | After | Speedup |
-| --- | --- | ---: | ---: | ---: |
-| Supplied page 16, 14 text blocks | 6 | 1,523 ms | 264 ms | 5.8x |
-| Same page | 5 | 1,394 ms | 274 ms | 5.1x |
-| One supplied 512-character repeated-zero block | 6 | 686 ms | 103 ms | 6.7x |
-| Synthetic 1,500-character Korean afterword | 6 | 173 ms | 84 ms | 2.1x |
-| Same synthetic Korean text, vertical | 6 | 637 ms | 341 ms | 1.9x |
+| Action | Baseline range | Optimized range |
+| --- | ---: | ---: |
+| Click box 13 on page 15, then immediately advance to page 16 | 3.54–3.96 s | 1.17–1.81 s |
+| Same action with an unsaved change requiring automatic saving | 4.11–4.16 s | 1.78–2.38 s |
 
-The supplied page contains two 512-character strings with 511 zeros each,
-in logical boxes approximately 7,124 pixels wide. Rich-text restoration was
-repeatedly rendering large stroke surfaces during synchronous formatting
-signals. A profiled Qt 6 page construction produced 102 full stroke layers;
-the optimized construction produces 14, one per text item. Document changes,
-layout, geometry updates, and text content retain their normal ownership.
+The original three-run comparison medians were 3.57 → 1.23 seconds without
+saving and 4.14 → 1.79 seconds with saving. Two additional clean verification
+runs took 1.81 / 1.78 seconds; one additional unsaved run took 2.38 seconds.
 
-For independent horizontal reflow measurements (Arial 24, 600-pixel box,
-Qt 5, 20 warm iterations), 700 / 4,000 / 20,000 characters took
-1.235 / 10.18 / 140.97 ms before and 0.748 / 5.11 / 53.30 ms after.
-The layout now indexes format runs instead of allocating a map entry for every
-UTF-16 unit, finds line font metrics by run, and avoids repeatedly copying a
-whole paragraph for each wrapped line. Empty Ruby layout skips its optional work.
+Timing starts before `QTest.mouseClick()` and stops after the destination canvas's
+first `paintEvent()`. The normal `shortcutNext()` application slot handles the
+transition. The unsaved case first moves the selected item by one pixel through
+the canvas undo command. Image loading, paired-editor construction, required
+saving, and the first canvas paint are included; screenshot capture is excluded.
+The destination contains 14 blocks, including two 512-character strings with
+511 zeros each in logical boxes approximately 7,124 pixels wide.
 
-## Reproduce
+## Isolated native text items
 
-Use the application's existing dependencies. No additional runtime dependency
-is required. From the candidate checkout, select either Qt binding and compare
-against an untouched checkout using the same benchmark script:
+The following synthetic cases use Malgun Gothic with the same Qt 6 Windows
+backend and baseline. Construction uses three fresh items with warm Qt/font
+caches; insertion and repaint use 15 samples. These measurements isolate text
+work and do not predict complete application response time.
 
-```powershell
-$env:QT_API = 'pyqt6' # repeat with pyqt5
-python scripts/benchmark_long_text.py --repeat 5
-python scripts/benchmark_long_text.py --source-root PATH_TO_BASELINE --repeat 5
-python scripts/benchmark_long_text.py --project-json PATH_TO_PROJECT_JSON --page 16 --repeat 5
-```
+| Fixture / operation | Baseline | Optimized |
+| --- | ---: | ---: |
+| 512 repeated zeros, construct | 1,143 ms | 80 ms |
+| Same item, insert one character | 1,141 ms | 77 ms |
+| 1,500-character wrapped Korean paragraph, construct | 257 ms | 253 ms |
+| Same paragraph, insert one character | 254 ms | 252 ms |
+| Same paragraph, warm paint | 33.4 ms | 33.4 ms |
+| Vertical Korean paragraph, construct | 435 ms | 428 ms |
 
-`--page` selects the one-based position in the JSON pages mapping.
-`--profile` prints a construction profile to stderr. Output includes timing
-samples, environment, block counts, and UTF-16 lengths. Input projects are
-read-only; no source text, project paths, or page images are emitted in the
-JSON timing report. Synthetic cases are reproducible without the private project;
-the supplied-project timings above use its saved fonts and rich text.
+The additional native optimization targets expensive long shaped lines. Short
+wrapped lines continue through Qt directly; forwarding them through a Python
+paint engine costs more than it saves. Long Korean paragraphs still benefit from
+the saved-text construction and format-run layout optimizations already present
+in the comparison baseline. Vertical native rendering keeps its existing path.
+
+## Ownership and mechanism
+
+Saved-text construction keeps document signals and layout live while restoring
+HTML, annotations, and the initial cursor, then builds one completed effect
+surface per item. Fragment lookup uses layout-owned UTF-16 format-run ends;
+line metrics visit intersecting runs, and horizontal reflow shares one paragraph
+text snapshot. These changes avoid repeated intermediate rasterization and
+unnecessary per-character/per-line work.
+
+For a long horizontal native-outline line, `rendering/native_paint.py` receives
+Qt's own shaped paths and partitions their closed contours into device-aligned
+strips. Each strip includes every overlapping contour and stroke overhang, with
+one disjoint pixel clip. Curve coordinates, fill rules, holes, and overlapping
+glyphs retain their native representation. Open, short, rotated/sheared, or
+unsupported pen paths keep native drawing. Window/viewport transforms bypass the
+proxy. A small bounded cache reuses contours only after exact Qt path equality.
+The document, text, undo history, logical geometry, and effect cache keys retain
+their existing owners.
 
 ## Verification and limits
 
-- Ten added regression tests pass on both bindings: completed import renders
-  once, subsequent edits and undo repaint correctly, rich formatting and active
-  transforms survive, UTF-16/IME lookup stays compatible, and long horizontal
-  reflow avoids per-character font queries and per-line paragraph copies.
-- Compared 402 existing layout, annotation, Ruby, effect, preview, alpha-mask,
-  and transform tests against the untouched baseline under each binding.
-  Failure/error/skip results are identical. These suites are **not entirely
-  green** on this machine; no new failures were introduced by this patch.
-- Before/after offscreen page and Korean fixture renders have zero differing
-  pixels, and plain text, Qt HTML, logical rectangles, and live bounds agree.
-  All 14 complete page-item effect surfaces also have identical RGBA hashes and
-  dimensions in each binding, including the offscreen portions of the two
-  7,128-pixel-wide padded zero-block rasters.
+- Eight native-path regression tests pass on both PyQt5 and PyQt6 using both
+  offscreen and Windows backends. They cover overlapping curves, holes,
+  fractional device scales, rich shaping, selections, clipping, painter-state
+  restoration, bounded reuse, editing, undo, and export.
+- Compared 412 existing layout, annotation, Ruby, effect, preview, alpha-mask,
+  transform, initialization, and performance tests against `8b28633` on both
+  bindings. Results match exactly: Qt 5 has 63 failures and one error; Qt 6 has
+  23 failures; each has 12 skips. These suites are not entirely green on this
+  machine; the comparison found no new failures or errors.
+- All 12 desktop comparison runs selected box 13 and loaded 14 destination
+  items. All complete item-effect RGBA surfaces, dimensions, and text hashes
+  match. Export differs only at four outer-page-edge pixels by at most 1/255
+  per color channel, from Qt's clipped-curve rounding. Interior pixels match.
 - Touched Python files compile and `git diff --check` passes.
 
-Warm page painting is already around 6 ms and is largely unchanged. Actual
-character insertion still rebuilds one complete stroke surface: roughly
-98 ms for the unusually wide zero block and 82 ms for the Korean fixture
-in this environment. This patch substantially reduces page construction and
-layout overhead; it does not eliminate native Qt stroke cost for every edit.
-Complex effects and very large text can therefore still pause while editing.
-Full foreground application interaction, including the user's exact installed
-font setup and image loading, has not been manually verified.
+Complete page navigation still includes image processing, widget construction,
+and saving. The observed 1.2–1.8 / 1.8–2.4 seconds include that remaining work.
+Wrapped/vertical text and complex effects
+can still pause during editing. Font choice, dimensions, effects, Qt backend,
+machine load, and hardware affect timings. OCR, translation services, and model
+loading were outside this verification.
 
-Focused checks:
+## Reproduce
+
+Use the application's existing dependencies; no additional runtime dependency
+is required. From the candidate checkout:
 
 ```powershell
-python -m unittest discover -s tests -p test_text_item_initialization.py
-python -m unittest discover -s tests -p test_text_layout_performance.py
+$env:QT_API = 'pyqt6' # repeat with pyqt5
+python scripts/benchmark_long_text.py --native --repeat 3
+python scripts/benchmark_long_text.py --native --source-root PATH_TO_BASELINE --repeat 3
+python scripts/benchmark_long_text.py --native --project-json PATH_TO_PROJECT_JSON --page 16 --repeat 3
 ```
 
-Existing comparison suites: `test_horizontal_whitespace`,
-`test_vertical_alignment`, `test_vertical_interaction`,
-`test_vertical_roman_alignment`, `test_rich_text_annotations`,
-`test_ruby_furigana`, `test_typed_text_effect_renderer`,
-`test_text_effect_preview`, `test_text_alpha_mask_renderer`, and
-`test_text_transform_undo`.
+Omit `--native` for offscreen comparisons. `--page` selects the one-based position
+in the JSON pages mapping; `--profile` prints an item-construction profile to
+stderr. Input projects are read-only. Reports include backend, timing samples,
+block counts, and UTF-16 lengths, without source text, project paths, or images.
+Synthetic cases require no private project. The complete-app measurements above
+use a local two-page copy and the application's normal font/startup setup.
+
+```powershell
+$env:QT_API = 'pyqt6' # repeat with pyqt5
+python -m unittest discover -s tests -p test_native_path_paint.py
+python -m unittest discover -s tests -p test_text_item_initialization.py
+python -m unittest discover -s tests -p test_text_layout_performance.py
+$env:QT_QPA_PLATFORM = 'windows'
+python -m unittest discover -s tests -p test_native_path_paint.py
+```

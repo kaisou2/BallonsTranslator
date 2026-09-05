@@ -136,6 +136,13 @@ Foreground and effect layouts must reuse the same settled offsets. Caches tied
 to placement must be invalidated with the layout generation and must not retain
 records from a replaced document layout.
 
+Long horizontal native-outline lines use `rendering/native_paint.py` to bound
+path rasterization while retaining Qt's shaped contours. Short wrapped lines
+stay on direct Qt drawing. The helper owns only transient painter forwarding
+and bounded contour reuse; it must not reshape text or alter document state.
+See [Long-text performance](../performance/long_text.md) for measurement and
+output-equivalence coverage.
+
 ## Invalidation and verification
 
 The normal path is:
