@@ -50,18 +50,19 @@ def letter_calculator(img, mask, bground_rgb, show_process=False):
     return letter_rgb, threshed
 
 # 预处理让文本颜色提取准确点
-def usm(src):
+def usm(src: np.ndarray) -> np.ndarray:
+    """Sharpen RGB/RGBA input without changing the source pixels.
+
+    >>> usm(np.zeros((2, 2, 4), dtype=np.uint8)).shape
+    (2, 2, 3)
+    """
     # Handle RGBA images by converting to RGB for processing
     if len(src.shape) == 3 and src.shape[2] == 4:
         src = cv2.cvtColor(src, cv2.COLOR_RGBA2RGB)
         
     blur_img = cv2.GaussianBlur(src, (0, 0), 5)
-    usm = cv2.addWeighted(src, 1.5, blur_img, -0.5, 0)
-    h, w = src.shape[:2]
-    result = np.zeros([h, w*2, 3], dtype=src.dtype)
-    result[0:h,0:w,:] = src
-    result[0:h,w:2*w,:] = usm
-    return usm
+    # Only the sharpened image is consumed; do not build a comparison canvas.
+    return cv2.addWeighted(src, 1.5, blur_img, -0.5, 0)
 
 # 计算文本rgb均值方法2，可能用中位数代替均值会好点
 def textrgb_calculator(img, text_mask, show_process=False):
