@@ -247,19 +247,12 @@ def connected_canny_flood(
         img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
 
     # 寻找最可能是气泡的外轮廓mask
-    def find_outermask(img):
+    def find_outermask(img: np.ndarray) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         connectivity = 4
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(img, connectivity, cv2.CV_16U)
         drawtext = np.zeros((img.shape[0], img.shape[1]), np.uint8)
         
         max_ind = np.argmax(stats[:, 4])
-        maxbbox_area, sec_ind = -1, -1
-        for ind, stat in enumerate(stats):
-            if ind != max_ind:
-                bbarea = stat[2] * stat[3]
-                if bbarea > maxbbox_area:
-                    maxbbox_area = bbarea
-                    sec_ind = ind
         drawtext[np.where(labels==max_ind)] = 255
         
         cv2.rectangle(drawtext, (0, 0), (img.shape[1]-1, img.shape[0]-1), (0, 0, 0), 1, cv2.LINE_8)
