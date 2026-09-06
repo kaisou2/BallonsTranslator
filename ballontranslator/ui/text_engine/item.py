@@ -497,6 +497,7 @@ class TextBlkItem(QGraphicsTextItem):
         # Import restores HTML, annotation formats, and the initial cursor in
         # several synchronous document changes. Keep layout/signals live, but
         # rasterize effects only after the complete saved text is restored.
+        # Preserve a caller's existing repaint guard when this load is nested.
         was_repainting = self.repainting
         self.repainting = True
         try:

@@ -29,7 +29,7 @@ _PATH_ELEMENT_THRESHOLD = 512
 _STRIP_WIDTH = 256
 _CONTOUR_CACHE_MAX_ENTRIES = 8
 _CONTOUR_CACHE_MAX_ELEMENTS = 32768
-_CONTOUR_CACHE: OrderedDict[tuple, tuple[bytes, list[QPainterPath]]] = OrderedDict()
+_CONTOUR_CACHE: OrderedDict[bytes, list[QPainterPath]] = OrderedDict()
 
 
 def _closed_contours(path: QPainterPath) -> Optional[list[QPainterPath]]:
@@ -38,21 +38,20 @@ def _closed_contours(path: QPainterPath) -> Optional[list[QPainterPath]]:
     >>> _closed_contours(QPainterPath())
     []
     """
-    rect = path.controlPointRect()
     count = path.elementCount()
-    key = (count, path.fillRule(), rect.x(), rect.y(), rect.width(), rect.height())
-    geometry = None
+    key = None
     if _PATH_ELEMENT_THRESHOLD <= count <= _CONTOUR_CACHE_MAX_ELEMENTS:
         # Qt path equality tolerates small coordinate differences. They can
         # cross a raster rounding boundary, so reuse requires exact path data.
+        # Key by that data directly so equal-bounds shapes can coexist.
         encoded = QByteArray()
         stream = QDataStream(encoded, QIODevice.OpenModeFlag.WriteOnly)
         stream << path
-        geometry = bytes(encoded)
-    cached = _CONTOUR_CACHE.get(key)
-    if cached is not None and cached[0] == geometry:
-        _CONTOUR_CACHE.move_to_end(key)
-        return cached[1]
+        key = bytes(encoded)
+        cached = _CONTOUR_CACHE.get(key)
+        if cached is not None:
+            _CONTOUR_CACHE.move_to_end(key)
+            return cached
     contours = []
     contour = None
     start = QPointF()
@@ -83,8 +82,8 @@ def _closed_contours(path: QPainterPath) -> Optional[list[QPainterPath]]:
             return None
         contour.closeSubpath()
         contours.append(contour)
-    if geometry is not None:
-        _CONTOUR_CACHE[key] = (geometry, contours)
+    if key is not None:
+        _CONTOUR_CACHE[key] = contours
         _CONTOUR_CACHE.move_to_end(key)
         while len(_CONTOUR_CACHE) > _CONTOUR_CACHE_MAX_ENTRIES:
             _CONTOUR_CACHE.popitem(last=False)
@@ -130,10 +129,7 @@ def _draw_path_in_strips(painter: QPainter, path: QPainterPath) -> None:
         else:
             pen_width_x = pen.widthF() * abs(transform.m11())
             pen_width_y = pen.widthF() * abs(transform.m22())
-    if (
-        visible_stroke
-        and min(pen_width_x, pen_width_y) <= 1.0
-    ):
+    if visible_stroke and min(pen_width_x, pen_width_y) <= 1.0:
         # Separately clipped draws change Qt's thin-stroke coverage throughout
         # the run. Transparent alignment outlines still accelerate native fill.
         painter.drawPath(path)
@@ -149,7 +145,7 @@ def _draw_path_in_strips(painter: QPainter, path: QPainterPath) -> None:
         width <= 0 or height <= 0
         or bounds.top() - reach_y < 0.0
         or bounds.bottom() + reach_y > height
-        or not visible_stroke and (bounds.left() < 0.0 or bounds.right() > width)
+        or (not visible_stroke and (bounds.left() < 0.0 or bounds.right() > width))
     ):
         # Device-edge clipping can change coverage after partitioning. Include
         # visible stroke overhang vertically; clipped fills also retain Qt's
@@ -270,22 +266,19 @@ class _NativePathEngine(QPaintEngine):
             )
 
     def drawPath(self, path: QPainterPath) -> None:
-        if self.probing:
-            return
-        _draw_path_in_strips(self.painter, path)
+        if not self.probing:
+            _draw_path_in_strips(self.painter, path)
 
     def drawPixmap(self, rect: QRectF, pixmap: QPixmap, source: QRectF) -> None:
-        if self.probing:
-            return
-        self.painter.drawPixmap(rect, pixmap, source)
+        if not self.probing:
+            self.painter.drawPixmap(rect, pixmap, source)
 
     def drawImage(
         self, rect: QRectF, image: QImage, source: QRectF,
         flags: Qt.ImageConversionFlag = Qt.ImageConversionFlag.AutoColor,
     ) -> None:
-        if self.probing:
-            return
-        self.painter.drawImage(rect, image, source, flags)
+        if not self.probing:
+            self.painter.drawImage(rect, image, source, flags)
 
     def drawPolygon(
         self, points: Iterable[Union[QPoint, QPointF]],
@@ -304,14 +297,12 @@ class _NativePathEngine(QPaintEngine):
             self.painter.drawPolygon(points, rule)
 
     def drawRects(self, rectangles: Iterable[Union[QRect, QRectF]]) -> None:
-        if self.probing:
-            return
-        self.painter.drawRects(rectangles)
+        if not self.probing:
+            self.painter.drawRects(rectangles)
 
     def drawLines(self, lines: Iterable[Union[QLine, QLineF]]) -> None:
-        if self.probing:
-            return
-        self.painter.drawLines(lines)
+        if not self.probing:
+            self.painter.drawLines(lines)
 
     def drawTextItem(self, point: QPointF, item: QTextItem) -> None:
         # The dry run detects native glyph items before any target paint.
@@ -320,17 +311,21 @@ class _NativePathEngine(QPaintEngine):
 
 
 class _NativePathDevice(QPaintDevice):
+    """Expose fixed raster metrics while Qt emits native paint commands.
+
+    >>> issubclass(_NativePathDevice, QPaintDevice)
+    True
+    """
+
     def __init__(self, painter: QPainter, probing: bool = False) -> None:
         super().__init__()
         self.target = painter.device()
         self.engine = _NativePathEngine(painter, probing)
-
-    def paintEngine(self) -> QPaintEngine:
-        return self.engine
-
-    def metric(self, metric: QPaintDevice.PaintDeviceMetric) -> int:
+        # The target is fixed for this paint. Snapshot public getters once:
+        # Qt 6's protected metric() can report base-device defaults for a
+        # Python-created QImage, even when these getters report the real values.
         metrics = QPaintDevice.PaintDeviceMetric
-        values = {
+        self._metrics = {
             metrics.PdmWidth: self.target.width(),
             metrics.PdmHeight: self.target.height(),
             metrics.PdmWidthMM: self.target.widthMM(),
@@ -346,8 +341,13 @@ class _NativePathDevice(QPaintDevice):
                 self.target.devicePixelRatioF() * QPaintDevice.devicePixelRatioFScale()
             ),
         }
-        if metric in values:
-            return values[metric]
+
+    def paintEngine(self) -> QPaintEngine:
+        return self.engine
+
+    def metric(self, metric: QPaintDevice.PaintDeviceMetric) -> int:
+        if metric in self._metrics:
+            return self._metrics[metric]
         return super().metric(metric)
 
 

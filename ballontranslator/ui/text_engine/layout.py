@@ -447,8 +447,8 @@ class SceneTextLayout(QAbstractTextDocumentLayout):
     ) -> Optional[CharFontFormat]:
         """Find the first largest font in a line without visiting each unit.
 
-        Match get_char_fontfmt's IME fallback and the original strict size
-        comparison, including ties and fonts with an unset point size.
+        Seed the unclipped start so IME fallback wins equal-size ties. The strict
+        size comparison also preserves the fallback for fonts without point sizes.
 
         >>> callable(SceneTextLayout.largest_font_format)
         True
