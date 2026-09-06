@@ -142,7 +142,9 @@ Qt's shaped contours. Widget painters, additional device transforms, selections,
 IME preedit, and short wrapped lines stay on direct Qt drawing. A dry paint
 checks Qt's resolved primitives before touching the destination; layouts that
 include native glyph items bypass forwarding to preserve Qt's glyph rendering.
-Visible outlines at or below one device pixel also bypass path partitioning. A widget's backing-store offset and
+Visible outlines at or below one device pixel also bypass path partitioning.
+Paths cut by the raster device's top or bottom retain direct Qt drawing;
+coverage differences there can survive tile composition and Inside Stroke. A widget's backing-store offset and
 logical device size must never be treated as an independent raster's geometry.
 The helper owns only transient painter forwarding and bounded contour reuse;
 it must not reshape text or alter document state. Screen regression checks must

@@ -23,8 +23,8 @@ and copied project. Values below are medians; desktop/widget work adds variance.
 The optimized event-processing endpoint ranges were 1.91–2.01 seconds without
 saving and 2.31–2.40 seconds with saving. Use that endpoint when describing
 complete UI response; first-frame timings alone omit subsequent event work.
-After the thin-stroke and native-glyph guards, one fresh follow-up run per
-condition completed UI processing in 1.85 seconds without saving and 2.04 seconds
+After the native-glyph and clipped-path guards, one fresh follow-up run per
+condition completed UI processing in 1.77 seconds without saving and 1.92 seconds
 with saving. These single-run checks confirm retained acceleration rather than
 replacing the repeated-sample ranges above.
 
@@ -44,13 +44,13 @@ The following synthetic cases use Malgun Gothic with the same Qt 6 Windows
 backend and baseline. Construction uses three fresh items with warm Qt/font
 caches; insertion and repaint use 15 samples. These measurements isolate text
 work and do not predict complete application response time. The zero fixture
-was remeasured after the thin-stroke and native-glyph guards; the wrapped and
+was remeasured after the native-glyph and clipped-path guards; the wrapped and
 vertical figures are from the earlier comparison.
 
 | Fixture / operation | Baseline | Optimized |
 | --- | ---: | ---: |
-| 512 repeated zeros, construct | 1,165 ms | 83 ms |
-| Same item, insert one character | 1,169 ms | 80 ms |
+| 512 repeated zeros, construct | 1,165 ms | 79 ms |
+| Same item, insert one character | 1,169 ms | 76 ms |
 | 1,500-character wrapped Korean paragraph, construct | 257 ms | 253 ms |
 | Same paragraph, insert one character | 254 ms | 252 ms |
 | Same paragraph, warm paint | 33.4 ms | 33.4 ms |
@@ -79,7 +79,10 @@ one disjoint pixel clip. Curve coordinates, fill rules, holes, and overlapping
 glyphs retain their native representation. Open, short, rotated/sheared, or
 unsupported pen paths keep native drawing. Visible strokes at or below one
 device pixel also keep native drawing, because strip clipping changes Qt's
-coverage for thin outlines. Widgets and any device whose matrix
+coverage for thin outlines. Paths crossing the device's top or bottom also
+retain direct Qt drawing. Clipped fill coverage can otherwise differ even with
+an invisible outline, and Inside Stroke can carry that change into final page
+pixels when the renderer uses visible tiles. Widgets and any device whose matrix
 contains more than the world transform and pixel-ratio scale bypass the proxy.
 Widget backing-store offsets and logical sizes are not raster-surface geometry.
 Window/viewport transforms, selections, and IME preedit also bypass it. Before
@@ -87,7 +90,7 @@ forwarding, a dry paint checks for native glyph items from mixed formats; those
 layouts draw directly because PyQt cannot forward shaped text items through
 QPainter. Both passes inherit the caller's complete painter state, and the
 probe never touches the destination. A small bounded cache reuses contours
-only after exact Qt path equality.
+only after Qt path equality.
 The document, text, undo history, logical geometry, and effect cache keys retain
 their existing owners.
 
@@ -134,6 +137,25 @@ their existing owners.
   hit testing, Ruby, initialization, editing/undo, transforms in both orders,
   effect stacks, masks, resource restore, and export. Only differences caused
   by this optimization are findings; unchanged upstream failures stay separate.
+- Real tile-policy page tests cover Inside Stroke at scales 1 / 1.25 / 2 and
+  compare final page pixels, alongside full-surface and Outside Stroke controls.
+  A font-independent clipped-ellipse test covers both the top and bottom edge.
+  Both variants detect the earlier splitter; all 22 native tests pass on both
+  Windows Qt bindings after the guard.
+- Named-font render comparisons use Windows and verify available families and
+  actual glyph IDs. The default offscreen backend can have an empty font
+  database and render replacement boxes, which is useful for structural checks
+  but insufficient evidence for real glyph equivalence. The new tile scene
+  tests skip explicitly when their required font/glyphs are unavailable; the
+  font-independent curve test remains active.
+- Additional Windows differential checks cover 1,134 edit/cache states, including
+  equal-metric/different-contour candidates and eviction. Repeated Qt 5 emoji
+  captures can also vary in the unmodified baseline; such variations are not
+  counted as optimization regressions without reproducible attribution.
+- Re-ran the 412-test comparison with the Windows backend. There are no newly
+  failing tests; current results retain 9 Qt 5 and 6 Qt 6 failures. A clipboard
+  subcase that differed in concurrent runs passed on both checkouts when rerun
+  separately. The broader Windows regression suite is not entirely green either.
 - Touched Python files compile and `git diff --check` passes.
 
 Complete page navigation still includes image processing, widget construction,

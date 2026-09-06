@@ -74,8 +74,8 @@ def _closed_contours(path: QPainterPath) -> Optional[list[QPainterPath]]:
         contours.append(contour)
     if _PATH_ELEMENT_THRESHOLD <= count <= _CONTOUR_CACHE_MAX_ELEMENTS:
         # Fill and Stroke share these native coordinates across repaints and
-        # items. Bounds only select a candidate; exact Qt path equality prevents
-        # stale reuse when different text has the same metrics.
+        # items. Bounds only select a candidate; ask Qt to compare the path
+        # geometry before reusing contours from text with the same metrics.
         _CONTOUR_CACHE[key] = (QPainterPath(path), contours)
         _CONTOUR_CACHE.move_to_end(key)
         while len(_CONTOUR_CACHE) > _CONTOUR_CACHE_MAX_ENTRIES:
@@ -104,6 +104,11 @@ def _draw_path_in_strips(painter: QPainter, path: QPainterPath) -> None:
         or not transform.isAffine()
         or pen.style() not in (Qt.PenStyle.NoPen, Qt.PenStyle.SolidLine)
     ):
+        painter.drawPath(path)
+        return
+    if bounds.top() < 0.0 or bounds.bottom() > painter.device().height():
+        # Partitioning a fill cut by the device's top/bottom changes Qt's
+        # coverage. Inside Stroke carries that difference into final page pixels.
         painter.drawPath(path)
         return
     pen_width = pen.widthF()
