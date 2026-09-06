@@ -177,6 +177,16 @@ Edits invalidate affected paragraphs, while document structure and global layout
 changes discard the retained entries. Wrapping, Ruby, emphasis, IME preedit, and
 transient layout formats retain the full shaping path.
 
+Vertical layout can also reuse unchanged short paragraphs that fit one column.
+Its keys include flow height, padding, typography, orientation policy, and device
+metrics; edits that preserve paragraph count can retain unaffected paragraphs.
+Each pass checks actual paragraph inputs and live Qt lines, then reconstructs
+absolute positions before the normal alignment, ink-bound, and size-publication
+steps. Cached local records and normalized draw offsets contain no native
+line/layout handles. Only the renderer's exact transparent Stroke-alignment
+format is accepted; other transient formats, inline objects, Ruby, tate-chu-yoko,
+emphasis, IME preedit, and delegated glyph rendering retain full shaping.
+
 Test relationships rather than exact font-dependent pixels. Cover the affected
 writing modes, alignments, spacing, annotations, effects, UTF-16 text, editing,
 resize, and mode switches. Focused coverage lives in:
@@ -188,6 +198,7 @@ resize, and mode switches. Focused coverage lives in:
 - `tests/test_rich_text_annotations.py`
 - `tests/test_ruby_furigana.py`
 - `tests/test_multiline_layout_reuse.py`
+- `tests/test_vertical_layout_reuse.py`
 
 Run both PyQt5 and PyQt6 when layout lifetime, shaping, cursor geometry, or
 painting behavior changes.
