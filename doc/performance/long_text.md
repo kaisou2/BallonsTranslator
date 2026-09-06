@@ -34,6 +34,35 @@ required saving, and paint are included; screenshot capture is excluded.
 The destination has 14 blocks, including two 512-character strings with 511
 zeros each in logical boxes approximately 7,124 pixels wide.
 
+## Many short paragraphs
+
+A saved page containing 600 characters in 150 short horizontal paragraphs
+(151 Qt blocks including the final empty paragraph) was measured with Noto Sans
+CJK KR, 20-pixel text, and an outside stroke. Three alternating fresh-process
+pairs compared `a16aa81` with the current implementation on the same Qt 6 Windows
+backend. Timing covers the normal previous-page shortcut and subsequent UI
+event processing; capture and export are outside the timed interval.
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Page load, median | 5.426 s | 1.564 s |
+| Page load, range | 5.422–5.482 s | 1.564–1.574 s |
+| First character insertion, median | 139.5 ms | 141.0 ms |
+| Warm insertion, median of five later edits per process | 99.7 ms | 102.9 ms |
+
+This improves loading by about 3.5 times; it does not demonstrate an editing
+speedup for this fixture. All six runs produced identical effect surfaces,
+complete page exports, and edited text. The largest shaped line contains only
+three UTF-16 units, so long-outline strip painting does not accelerate it.
+Separate profiles retain all 609 full-layout notifications while reducing
+native `QTextLayout.beginLayout()` calls from 91,364 to 2,262 by reusing unchanged
+single-line paragraphs. Format metrics are also shared within each rebuild.
+Full document traversal remains; the optimization does not make the entire
+import linear in paragraph count.
+
+The synthetic `--case short-lines` fixture reproduces this input pattern without
+private project data. Its isolated-item timing excludes application page work.
+
 ## Isolated native text items
 
 Malgun Gothic, the same Qt 6 Windows backend, and baseline `8b28633` are used.
@@ -64,6 +93,11 @@ Wrapped/vertical controls also retained their performance.
 
 Regression suites and differential audits cover the following on both bindings:
 
+- The four paragraph-reuse checks pass on both Windows bindings. Differential
+  comparisons of 40 rich-text fixtures at construction/reload and 104 editing
+  states per binding preserve geometry, cursor positions, formats, and pixels.
+  They include opposing spacing changes, narrow boxes, mixed fonts, annotations,
+  resize, undo/redo, writing-mode changes, and actual IME preedit/commit events.
 - All 27 native regressions pass on Qt 5/6 Windows. They cover
   contours/holes, shaping, thin strokes, clipping and tile composition,
   device scales, painter state, mixed glyph fallback, editing/undo, and export.
@@ -87,12 +121,14 @@ Regression suites and differential audits cover the following on both bindings:
   widget painting and effect pixmaps at ratio 1. Ratios 1 / 1.25 / 1.5 / 2 retain
   acceleration in helper tests.
 
-Broader suites are not fully green. The cleanup's 412-test Windows comparison
-against `a70cb22` retained the same failures (Qt 5: 9, Qt 6: 6). A subsequent
-comparison of 402 tests shared with untouched upstream `682c752` also matched
-exactly (Qt 5: 6, Qt 6: 5); selection-color checks passed in that run. Execution
-conditions and Qt 5 emoji rendering can affect results even upstream, so a
-failure needs reproducible attribution before being called a regression.
+Broader suites are not fully green. The current 402-test Windows run reports
+six failures per binding and no errors. Qt 5 matches `a16aa81`; Qt 6 retains its
+five baseline failures and also hit an intermittent selection-color assertion.
+The same assertion failed in the older `a70cb22` baseline. In a current isolated
+failure, the text items lacked focus while the check expected the active
+selection color. Isolated runs also show intermittent results. Execution
+conditions and Qt 5 emoji rendering can
+affect results even upstream, so failures require reproducible attribution.
 
 Named-font evidence requires the Windows backend, available families, and actual
 glyph IDs. Offscreen may have an empty font database and draw replacement boxes;
@@ -115,12 +151,14 @@ From the candidate checkout, repeat these commands with `QT_API=pyqt5`:
 ```powershell
 $env:QT_API = 'pyqt6'
 python scripts/benchmark_long_text.py --native --repeat 3
+python scripts/benchmark_long_text.py --native --case short-lines --repeat 3
 python scripts/benchmark_long_text.py --native --source-root PATH_TO_BASELINE --repeat 3
 python scripts/benchmark_long_text.py --native --project-json PATH_TO_PROJECT_JSON --page 16 --repeat 3
 $env:QT_QPA_PLATFORM = 'offscreen'
 python -m unittest discover -s tests -p 'test_native_*.py'
 python -m unittest discover -s tests -p test_text_item_initialization.py
 python -m unittest discover -s tests -p test_text_layout_performance.py
+python -m unittest discover -s tests -p test_multiline_layout_reuse.py
 $env:QT_QPA_PLATFORM = 'windows'
 python -m unittest discover -s tests -p 'test_native_*.py'
 git diff --check

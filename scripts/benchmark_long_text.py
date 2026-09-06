@@ -3,6 +3,7 @@
 Run from a checkout with the application's existing dependencies installed::
 
     python scripts/benchmark_long_text.py --repeat 5
+    python scripts/benchmark_long_text.py --native --case short-lines --repeat 3
     python scripts/benchmark_long_text.py --project-json PATH --page 16
 
 Set QT_API=pyqt5 or QT_API=pyqt6 before running to compare bindings. The
@@ -33,7 +34,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repeat', type=int, default=5)
     parser.add_argument(
-        '--case', choices=('all', 'zeros', 'korean', 'korean-vertical'),
+        '--case', choices=('all', 'zeros', 'short-lines', 'korean', 'korean-vertical'),
         default='all', help='Synthetic fixture; ignored with --project-json.',
     )
     parser.add_argument('--font', default='Malgun Gothic')
@@ -93,6 +94,8 @@ def main() -> None:
 
     def synthetic_block(case: str) -> TextBlock:
         bounds = [0, 0, 7124, 35] if case == 'zeros' else [0, 0, 900, 700]
+        if case == 'short-lines':
+            bounds = [0, 0, 286, 4200]
         block = TextBlock(bounds)
         block._bounding_rect = list(bounds)
         block.fontformat.font_family = arguments.font
@@ -113,6 +116,34 @@ def main() -> None:
             block.fontformat.text_transform = TextTransformStack((
                 ProjectiveTextTransform(vertical_scale=1.2),
             ))
+        elif case == 'short-lines':
+            block.vertical = False
+            block.fontformat.font_size = 20
+            block.fontformat.letter_spacing = 0.95
+            block.fontformat.line_spacing = 1.3
+            block.fontformat.ligature_discretionary = 'enabled'
+            block.translation = '짧은글\n' * 150
+            family = html.escape(arguments.font, quote=True)
+            paragraphs = []
+            for index in range(150):
+                spacing = 0.95 if index % 2 == 0 else 1.0
+                paragraphs.append(
+                    '<p style="margin:0; line-height:1.3;">'
+                    f'<span style="letter-spacing:{spacing - 1:g}em; '
+                    'font-variant-ligatures:discretionary-ligatures;" '
+                    f'data-btrans-letter-spacing="{spacing:g}">짧은글</span></p>'
+                )
+            # Keep the final empty paragraph: 150 three-unit lines plus their
+            # newlines contain 600 UTF-16 units, without any private project.
+            paragraphs.append(
+                '<p style="-qt-paragraph-type:empty; margin:0; '
+                'line-height:1.3;"><br /></p>'
+            )
+            block.rich_text = (
+                '<html><head><meta name="qrichtext" content="1" /></head>'
+                f'<body style="font-family:&quot;{family}&quot;;font-size:15pt;">'
+                + ''.join(paragraphs) + '</body></html>'
+            )
         else:
             sentence = (
                 '안녕하세요. 오랜 시간 작품을 읽어 주신 모든 독자 여러분께 '
@@ -136,7 +167,7 @@ def main() -> None:
             return [TextBlock(**copy.deepcopy(value)) for value in selected_page]
     else:
         cases = (
-            ['zeros', 'korean', 'korean-vertical']
+            ['zeros', 'short-lines', 'korean', 'korean-vertical']
             if arguments.case == 'all' else [arguments.case]
         )
 

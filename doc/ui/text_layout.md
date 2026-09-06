@@ -133,8 +133,8 @@ shaping, but they do not change the logical UTF-16 editing range.
 
 Document backgrounds paint below selection, and glyph ink paints above it.
 Foreground and effect layouts must reuse the same settled offsets. Caches tied
-to placement must be invalidated with the layout generation and must not retain
-records from a replaced document layout.
+to absolute placement must be invalidated with the layout generation and must
+not retain records from a replaced document layout.
 
 Long horizontal native-outline lines use `rendering/native_paint.py` on
 independent QImage/QPixmap surfaces to bound path rasterization while retaining
@@ -170,6 +170,13 @@ document or format change
   -> publish size and refresh geometry/effects
 ```
 
+Format metrics are shared only within one rebuild. Unchanged one-line horizontal
+paragraphs may reuse Qt shaping when their text, formats, layout options, width,
+and device metrics match; absolute positions are recalculated each generation.
+Edits invalidate affected paragraphs, while document structure and global layout
+changes discard the retained entries. Wrapping, Ruby, emphasis, IME preedit, and
+transient layout formats retain the full shaping path.
+
 Test relationships rather than exact font-dependent pixels. Cover the affected
 writing modes, alignments, spacing, annotations, effects, UTF-16 text, editing,
 resize, and mode switches. Focused coverage lives in:
@@ -180,6 +187,7 @@ resize, and mode switches. Focused coverage lives in:
 - `tests/test_vertical_roman_alignment.py`
 - `tests/test_rich_text_annotations.py`
 - `tests/test_ruby_furigana.py`
+- `tests/test_multiline_layout_reuse.py`
 
 Run both PyQt5 and PyQt6 when layout lifetime, shaping, cursor geometry, or
 painting behavior changes.
