@@ -142,25 +142,21 @@ class NativeWidgetPaintTest(unittest.TestCase):
             for cache in (QGraphicsItem.CacheMode.NoCache,
                           QGraphicsItem.CacheMode.DeviceCoordinateCache,
                           QGraphicsItem.CacheMode.ItemCoordinateCache):
-                item.setCacheMode(cache)
                 for zoom in (0.45, 0.7, 1.25):
                     with self.subTest(cache=cache, zoom=zoom,
                                       dpr=parent.devicePixelRatioF()):
                         view.setTransform(QTransform.fromScale(zoom, zoom))
                         view.centerOn(400, 110)
-                        item.batched = False
                         # Compare fresh caches: Qt's partial cache repaint can
                         # round differently even for two native-only draws.
-                        item.setCacheMode(QGraphicsItem.CacheMode.NoCache)
-                        item.setCacheMode(cache)
-                        item.update()
-                        expected = parent.grab().toImage()
-                        item.batched = True
-                        item.setCacheMode(QGraphicsItem.CacheMode.NoCache)
-                        item.setCacheMode(cache)
-                        item.update()
-                        actual = parent.grab().toImage()
-                        self._assert_same_pixels(expected, actual)
+                        images = []
+                        for batched in (False, True):
+                            item.batched = batched
+                            item.setCacheMode(QGraphicsItem.CacheMode.NoCache)
+                            item.setCacheMode(cache)
+                            item.update()
+                            images.append(parent.grab().toImage())
+                        self._assert_same_pixels(*images)
         finally:
             parent.close()
             parent.deleteLater()

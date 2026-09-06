@@ -17,7 +17,7 @@ from qtpy.QtGui import (
 from qtpy.QtWidgets import QApplication
 
 from ballontranslator.ui.text_engine.rendering.native_paint import (
-    _closed_contours, _draw_path_in_strips, draw_native_layout, _CONTOUR_CACHE,
+    _closed_contours, _draw_path_in_strips, draw_native_layout,
 )
 from ballontranslator.ui.text_engine import horizontal_layout
 from ballontranslator.ui.text_engine.item import TextBlkItem
@@ -174,36 +174,6 @@ class NativePathPaintTest(unittest.TestCase):
         self.assertGreater(len(sizes), 1)
         self.assertLess(max(sizes), path.elementCount() // 3)
         self.assertLess(sum(sizes), path.elementCount() * 2)
-
-    def test_repaint_reuses_contours_but_equal_bounds_do_not_alias_different_ink(self) -> None:
-        _CONTOUR_CACHE.clear()
-        path = self._rings(Qt.FillRule.WindingFill)
-        first = _closed_contours(path)
-        with patch.object(QPainterPath, 'elementAt', side_effect=AssertionError('reparsed')):
-            self.assertIs(_closed_contours(QPainterPath(path)), first)
-        changed = QPainterPath(path)
-        control = changed.elementAt(2)
-        changed.setElementPositionAt(2, control.x, control.y - 0.125)
-        self.assertEqual(changed.controlPointRect(), path.controlPointRect())
-        self.assertEqual(changed.elementCount(), path.elementCount())
-        second = _closed_contours(changed)
-        self.assertIsNot(first, second)
-        self.assertNotEqual(first[0], second[0])
-
-    def test_contour_retention_is_bounded_for_pages_and_oversized_paths(self) -> None:
-        _CONTOUR_CACHE.clear()
-        for shift in range(12):
-            path = self._rings(Qt.FillRule.WindingFill)
-            path.translate(shift, 0)
-            _closed_contours(path)
-        self.assertLessEqual(len(_CONTOUR_CACHE), 8)
-        keys = tuple(_CONTOUR_CACHE)
-        oversized = QPainterPath()
-        for _ in range(7):
-            oversized.addPath(path)
-        self.assertGreater(oversized.elementCount(), 32768)
-        _closed_contours(oversized)
-        self.assertEqual(tuple(_CONTOUR_CACHE), keys)
 
     def test_layout_failure_restores_the_caller_painter(self) -> None:
         image = self._image()

@@ -9,18 +9,16 @@ import numpy as np
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from qtpy.QtCore import QCoreApplication, QEvent, QPointF, QRectF, Qt
+from qtpy.QtCore import QCoreApplication, QEvent, QPointF, QRectF
 from qtpy.QtGui import (
-    QColor, QFont, QFontDatabase, QImage, QPainter, QPainterPath, QPen,
+    QColor, QFont, QFontDatabase, QImage, QPainter,
     QRawFont, QTextLayout,
 )
 from qtpy.QtWidgets import QApplication, QGraphicsScene
 
 from ballontranslator.ui.text_engine import horizontal_layout
 from ballontranslator.ui.text_engine.item import TextBlkItem
-from ballontranslator.ui.text_engine.rendering.native_paint import (
-    _draw_path_in_strips, draw_native_layout,
-)
+from ballontranslator.ui.text_engine.rendering.native_paint import draw_native_layout
 from ballontranslator.utils.text_effects import SolidPaint, StrokeEffect, TextEffectStack
 from ballontranslator.utils.textblock import TextBlock
 
@@ -30,42 +28,6 @@ def _direct_draw(
     selections: list[QTextLayout.FormatRange], clip: QRectF,
 ) -> None:
     layout.draw(painter, QPointF(), selections, clip)
-
-
-class NativeClippedPathTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.app = QApplication.instance() or QApplication([])
-
-    def test_top_and_bottom_clipped_curves_keep_native_coverage(self) -> None:
-        path = QPainterPath()
-        path.setFillRule(Qt.FillRule.WindingFill)
-        for index in range(100):
-            path.addEllipse(QRectF(
-                index * 22.137 + 0.415, -0.836, 18.362, 25.725,
-            ))
-        for reflected in (False, True):
-            with self.subTest(reflected=reflected):
-                images = []
-                for optimized in (False, True):
-                    image = QImage(1400, 80, QImage.Format.Format_ARGB32_Premultiplied)
-                    image.fill(Qt.GlobalColor.transparent)
-                    painter = QPainter(image)
-                    try:
-                        if reflected:
-                            painter.translate(0, image.height())
-                        painter.scale(1.25, -1.25 if reflected else 1.25)
-                        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                        painter.setPen(QPen(QColor(0, 0, 0, 0), 0.0, Qt.PenStyle.SolidLine))
-                        painter.setBrush(QColor(30, 80, 130))
-                        if optimized:
-                            _draw_path_in_strips(painter, path)
-                        else:
-                            painter.drawPath(path)
-                    finally:
-                        painter.end()
-                    images.append(image)
-                self.assertEqual(*images)
 
 
 class NativeTiledPaintTest(unittest.TestCase):

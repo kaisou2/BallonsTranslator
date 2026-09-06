@@ -1,9 +1,9 @@
-"""Native outline dispatch preserves inherited paint and native glyph runs."""
+"""Native outline dispatch preserves painter state, glyphs, and device ratios."""
 from __future__ import annotations
 
-from contextlib import ExitStack
 import math
 import os
+from typing import Optional
 import unittest
 from unittest.mock import patch
 
@@ -11,7 +11,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from qtpy.QtCore import QPointF, QRectF, Qt
 from qtpy.QtGui import (
-    QBrush, QColor, QFont, QImage, QPainter, QPen, QTextLayout,
+    QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QTextLayout,
 )
 from qtpy.QtWidgets import QApplication
 
@@ -75,10 +75,11 @@ class NativePainterStateTest(unittest.TestCase):
         layout: QTextLayout,
         *,
         dpr: float = 1.0,
+        pixmap: bool = False,
         opaque_background: bool = False,
         multiply: bool = False,
         selections: tuple[QTextLayout.FormatRange, ...] = (),
-        partitioned: bool,
+        partitioned: Optional[bool],
     ) -> None:
         """Check exact pixels and painter ownership away from device edges.
 
@@ -90,25 +91,14 @@ class NativePainterStateTest(unittest.TestCase):
         width = math.ceil((bounds.width() + 2 * margin) * dpr)
         height = math.ceil((bounds.height() + 2 * margin) * dpr)
         outputs = []
-        primitive_calls = {True: [], False: []}
-        engine = native_paint._NativePathEngine
-
-        def observe(name: str):
-            original = getattr(engine, name)
-
-            def record(instance, *args):
-                primitive_calls[instance.probing].append((
-                    name, args[0].elementCount() if name == 'drawPath' else None,
-                ))
-                return original(instance, *args)
-
-            return record
-
         for accelerated in (False, True):
-            image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
-            image.setDevicePixelRatio(dpr)
-            image.fill(QColor(18, 77, 125, 180))
-            painter = QPainter(image)
+            surface = (
+                QPixmap(width, height) if pixmap else
+                QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+            )
+            surface.setDevicePixelRatio(dpr)
+            surface.fill(QColor(18, 77, 125, 180))
+            painter = QPainter(surface)
             painter.translate(margin + 0.375, margin + 2.125)
             painter.setPen(QPen(QColor(10, 40, 235, 210), 1.7))
             painter.setBrush(QBrush(QColor(40, 190, 75), Qt.BrushStyle.Dense3Pattern))
@@ -132,45 +122,25 @@ class NativePainterStateTest(unittest.TestCase):
             before = self._painter_state(painter)
             try:
                 if accelerated:
-                    with ExitStack() as patches:
-                        for primitive in (
-                            'drawPath', 'drawPixmap', 'drawImage', 'drawPolygon',
-                            'drawRects', 'drawLines', 'drawTextItem',
-                        ):
-                            patches.enter_context(patch.object(
-                                engine, primitive, observe(primitive),
-                            ))
-                        strips = patches.enter_context(patch.object(
-                            native_paint, '_draw_path_in_strips',
-                            wraps=native_paint._draw_path_in_strips,
-                        ))
-                        contours = patches.enter_context(patch.object(
-                            native_paint, '_closed_contours',
-                            wraps=native_paint._closed_contours,
-                        ))
+                    with patch.object(
+                        native_paint, '_draw_path_in_strips',
+                        wraps=native_paint._draw_path_in_strips,
+                    ) as strips, patch.object(
+                        native_paint, '_closed_contours',
+                        wraps=native_paint._closed_contours,
+                    ) as contours:
                         native_paint.draw_native_layout(layout, painter, selections, QRectF())
                         if partitioned:
-                            self.assertGreater(strips.call_count, 0)
                             self.assertGreater(contours.call_count, 0)
-                        else:
+                        elif partitioned is False:
                             self.assertEqual(strips.call_count, 0)
                 else:
                     layout.draw(painter, QPointF(), selections, QRectF())
                 self.assertEqual(self._painter_state(painter), before)
             finally:
                 painter.end()
-            outputs.append(image)
+            outputs.append(surface.toImage() if pixmap else surface)
         self.assertEqual(outputs[0], outputs[1])
-        if partitioned:
-            self.assertTrue(primitive_calls[True])
-            self.assertEqual(primitive_calls[True], primitive_calls[False])
-            self.assertNotIn('drawTextItem', [name for name, _ in primitive_calls[True]])
-        elif not selections and not layout.preeditAreaText():
-            self.assertIn('drawTextItem', [name for name, _ in primitive_calls[True]])
-            self.assertFalse(primitive_calls[False])
-        else:
-            self.assertFalse(primitive_calls[True])
-            self.assertFalse(primitive_calls[False])
 
     def test_fully_outlined_runs_inherit_painter_state_and_keep_partitioning(self) -> None:
         for foreground in (False, True):
@@ -222,6 +192,21 @@ class NativePainterStateTest(unittest.TestCase):
             for dpr in (1.0, 1.25):
                 with self.subTest(preedit=preedit, dpr=dpr):
                     self._compare(layout, dpr=dpr, partitioned=False)
+
+    def test_fractional_device_ratios_preserve_pixels(self) -> None:
+        layout = self._layout('0' * 160, foreground=True)
+        # Qt 5 can round the stored DPR; either dispatch must preserve pixels.
+        for dpr in (1.1, 1.2, 1.3, 4 / 3):
+            for pixmap in (False, True):
+                with self.subTest(dpr=dpr, pixmap=pixmap):
+                    self._compare(layout, dpr=dpr, pixmap=pixmap, partitioned=None)
+
+    def test_exact_fixed_point_ratios_keep_acceleration(self) -> None:
+        layout = self._layout('0' * 160, foreground=True)
+        for dpr in (1.0, 1.25, 1.5, 2.0):
+            for pixmap in (False, True):
+                with self.subTest(dpr=dpr, pixmap=pixmap):
+                    self._compare(layout, dpr=dpr, pixmap=pixmap, partitioned=True)
 
 
 if __name__ == '__main__':

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
@@ -59,14 +60,16 @@ class NativeContourPrecisionTest(unittest.TestCase):
             painter.end()
         return image
 
-    def test_nearby_vertices_do_not_reuse_previous_contours(self) -> None:
+    def test_cache_reuses_exact_geometry_without_aliasing_nearby_vertices(self) -> None:
         previous, changed = self._nearby_paths()
         self.assertEqual(previous.elementCount(), changed.elementCount())
         self.assertEqual(previous.controlPointRect(), changed.controlPointRect())
         _closed_contours(previous)
         contours = _closed_contours(changed)
         self.assertEqual(contours[1].elementAt(0).y, changed.elementAt(5).y)
-        self.assertIs(_closed_contours(QPainterPath(changed)), contours)
+        # A warm hit must avoid walking the path elements again.
+        with patch.object(QPainterPath, 'elementAt', side_effect=AssertionError('reparsed')):
+            self.assertIs(_closed_contours(QPainterPath(changed)), contours)
 
     def test_render_does_not_depend_on_cache_history(self) -> None:
         previous, changed = self._nearby_paths()
@@ -77,6 +80,20 @@ class NativeContourPrecisionTest(unittest.TestCase):
         warm = self._render(changed, True)
         self.assertEqual(cold, expected)
         self.assertEqual(warm, expected)
+
+    def test_contour_retention_is_bounded_for_pages_and_oversized_paths(self) -> None:
+        for shift in range(12):
+            path, _ = self._nearby_paths()
+            path.translate(shift, 0)
+            _closed_contours(path)
+        self.assertLessEqual(len(_CONTOUR_CACHE), 8)
+        keys = tuple(_CONTOUR_CACHE)
+        oversized = QPainterPath()
+        for _ in range(32768 // path.elementCount() + 1):
+            oversized.addPath(path)
+        self.assertGreater(oversized.elementCount(), 32768)
+        _closed_contours(oversized)
+        self.assertEqual(tuple(_CONTOUR_CACHE), keys)
 
 
 if __name__ == '__main__':

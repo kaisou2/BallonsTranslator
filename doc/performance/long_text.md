@@ -17,20 +17,17 @@ same dependencies, fonts, configuration, and copied project. Values are medians.
 
 | Action / measurement endpoint | Baseline | Optimized |
 | --- | ---: | ---: |
-| Click box 13 on page 15 and advance: first canvas frame | 4.19 s | 1.30 s |
-| Same action: pending UI event processing completed | 4.20 s | 1.99 s |
-| Unsaved change requiring automatic saving: first canvas frame | 3.88 s | 1.55 s |
-| Same unsaved case: pending UI event processing completed | 4.65 s | 2.31 s |
+| Click box 13 on page 15 and advance: UI event processing completed | 4.20 s | 1.99 s |
+| Same action with an unsaved change requiring automatic saving | 4.65 s | 2.31 s |
 
 Optimized event-processing ranges were 1.91–2.01 seconds without saving and
-2.31–2.40 seconds with saving. The later cache/device cleanup was compared
-directly with `a70cb22`, alternating three fresh processes per version and
-condition. Complete response was 1.869 → 1.854 seconds without saving and
+2.31–2.40 seconds with saving. A cleanup comparison alternated `a70cb22` and
+`c58e3d0` in three fresh processes per version and condition. Complete response
+was 1.869 → 1.854 seconds without saving and
 2.023 → 2.031 seconds with saving: effectively unchanged within desktop variance.
 
 Timing starts before `QTest.mouseClick()` and uses the normal `shortcutNext()`
-slot. The first-frame endpoint follows the destination canvas's first
-`paintEvent()`; complete response is measured after the following
+slot. Complete response is measured after the following
 `QApplication.processEvents()` returns. The unsaved case first moves the selected
 item one pixel through a canvas undo command. Image loading, paired editors,
 required saving, and paint are included; screenshot capture is excluded.
@@ -58,36 +55,31 @@ lines and vertical rendering retain their existing Qt path. Wrapped Korean
 already benefits from construction/layout optimizations in `8b28633`; these
 isolated timings do not predict complete application response.
 
-The cleanup check against `a70cb22` used four process pairs in alternating order,
+The `a70cb22` → `c58e3d0` check used four process pairs in alternating order,
 each constructing five zero items and making 25 edits. Medians of process medians
 were 84.26 → 84.42 ms for construction and 81.11 → 81.28 ms for insertion.
-Wrapped/vertical controls also retained their performance. Device metrics are
-now sampled once per transient proxy; exact serialized contour keys allow
-different equal-bounds shapes to coexist within the existing bounded cache.
+Wrapped/vertical controls also retained their performance.
 
 ## Verification and limits
 
 Regression suites and differential audits cover the following on both bindings:
 
-- All 29 native-rendering regressions pass with the Windows backend. Coverage
-  includes contours/holes, shaping, thin strokes, clipping and tile composition,
+- All 27 native regressions pass on Qt 5/6 Windows. They cover
+  contours/holes, shaping, thin strokes, clipping and tile composition,
   device scales, painter state, mixed glyph fallback, editing/undo, and export.
+  Overlapping setup is shared; distinct failure cases remain separate.
   Run GUI suites separately: focus, clipboard, and IME are shared resources.
-- Earlier UI comparisons used exact pixels from complete-parent captures with an
-  offset child viewport; `viewport.grab()` can hide backing-store offsets.
-  All 144 captures across display scales 1 / 1.25 / 2, zooms
-  0.44 / 0.66 / 1 / 1.5, and idle/selected/editing states match upstream.
-  Four captures of the reported two-item project also match, including guides.
+- Earlier upstream comparisons cover screen paint, editing, UTF-16/Ruby,
+  transforms/effects, cache reuse, document and MainWindow lifecycle, pending
+  edits, and saved results. Screen checks capture the parent window with an
+  offset child; `viewport.grab()` can hide backing-store offsets.
 - All 12 cleanup timing runs preserved item-effect RGBA surfaces, dimensions,
   text hashes, layouts, and complete page exports against `a70cb22`.
   Standalone visible-stroke raster checks still allow outermost-column rounding
   of at most 1/255; this is not a whole-image equality claim.
-- Earlier differential checks cover 1,134 edit/cache states, 192 RGB/RGBA renders,
-  298 document states, and 42 real MainWindow lifecycle states. They include
-  UTF-16 interaction, Ruby, nested content, transforms/effects, pending edits,
-  page replacement, undo/redo, resource release, and saved-output equivalence.
-  Repeated Qt 5 emoji captures can vary in upstream too; a finding requires
-  reproducible attribution to the optimization.
+- Actual `result/15.png` and `result/16.png` files written by `manual_save()`
+  match upstream `682c752` byte for byte at 1440×2048 under the same Qt 6, fonts,
+  project, and PNG settings. This is evidence for that fixture, not every font.
 - Precision guards have narrower proven scope: exact contour keys fix a
   five-pixel cache-history error in helper tests, and device-ratio fallback fixes
   Qt 6 proxy truncation at 1.1 / 1.2 / 1.3 / 4/3. Neither defect has an established
@@ -95,11 +87,12 @@ Regression suites and differential audits cover the following on both bindings:
   widget painting and effect pixmaps at ratio 1. Ratios 1 / 1.25 / 1.5 / 2 retain
   acceleration in helper tests.
 
-The broader 412-test comparison is not fully green. Earlier offscreen results
-matched `8b28633`: Qt 5 has 63 failures and one error, Qt 6 has 23 failures, and each
-has 12 skips. The cleanup comparison against `a70cb22`, run sequentially on
-Windows, preserves the exact failure/error/skip lists: 9 failures on Qt 5 and
-6 on Qt 6, with no errors or new failures.
+Broader suites are not fully green. The cleanup's 412-test Windows comparison
+against `a70cb22` retained the same failures (Qt 5: 9, Qt 6: 6). A subsequent
+comparison of 402 tests shared with untouched upstream `682c752` also matched
+exactly (Qt 5: 6, Qt 6: 5); selection-color checks passed in that run. Execution
+conditions and Qt 5 emoji rendering can affect results even upstream, so a
+failure needs reproducible attribution before being called a regression.
 
 Named-font evidence requires the Windows backend, available families, and actual
 glyph IDs. Offscreen may have an empty font database and draw replacement boxes;

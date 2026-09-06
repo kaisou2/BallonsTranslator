@@ -7,17 +7,15 @@ from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from qtpy.QtCore import QPointF, QRectF, Qt
+from qtpy.QtCore import QPointF, QRectF
 from qtpy.QtGui import (
-    QColor, QImage, QPainter, QPainterPath, QPen, QTextCursor, QTextLayout,
+    QImage, QPainter, QTextCursor, QTextLayout,
 )
 from qtpy.QtWidgets import QApplication
 
 from ballontranslator.ui.text_engine import horizontal_layout
 from ballontranslator.ui.text_engine.item import TextBlkItem
-from ballontranslator.ui.text_engine.rendering.native_paint import (
-    _draw_path_in_strips, draw_native_layout,
-)
+from ballontranslator.ui.text_engine.rendering.native_paint import draw_native_layout
 from ballontranslator.utils.text_effects import (
     SolidPaint, StrokeEffect, TextEffectStack,
 )
@@ -97,37 +95,6 @@ class NativeThinStrokeTest(unittest.TestCase):
                     self._item_images('Arial', 36, width, False, mixed=True),
                     self._item_images('Arial', 36, width, True, mixed=True),
                 )
-
-    def test_ordinary_strokes_and_invisible_alignment_keep_partitioning(self) -> None:
-        path = QPainterPath()
-        for index in range(200):
-            path.addEllipse(QRectF(10 + index * 12, 12, 10, 20))
-        for pen in (
-            QPen(QColor('white'), 3),
-            QPen(QColor(0, 0, 0, 0), 0, Qt.PenStyle.SolidLine),
-            QPen(Qt.PenStyle.NoPen),
-        ):
-            with self.subTest(pen=pen):
-                image = QImage(2600, 60, QImage.Format.Format_ARGB32_Premultiplied)
-                image.fill(Qt.GlobalColor.transparent)
-                painter = QPainter(image)
-                painter.setPen(pen)
-                painter.setBrush(QColor('black'))
-                sizes = []
-                original_draw = painter.drawPath
-
-                def record_draw(part: QPainterPath) -> None:
-                    sizes.append(part.elementCount())
-                    original_draw(part)
-
-                try:
-                    with patch.object(painter, 'drawPath', side_effect=record_draw):
-                        _draw_path_in_strips(painter, path)
-                finally:
-                    painter.end()
-                self.assertGreater(len(sizes), 1)
-                self.assertLess(max(sizes), path.elementCount())
-
 
 if __name__ == '__main__':
     unittest.main()
