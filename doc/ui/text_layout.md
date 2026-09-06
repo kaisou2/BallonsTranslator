@@ -139,13 +139,18 @@ records from a replaced document layout.
 Long horizontal native-outline lines use `rendering/native_paint.py` on
 independent QImage/QPixmap surfaces to bound path rasterization while retaining
 Qt's shaped contours. Widget painters, additional device transforms, selections,
-IME preedit, and short wrapped lines stay on direct Qt drawing. A dry paint
+IME preedit, and short wrapped lines stay on direct Qt drawing. Raster device
+ratios that the proxy's fixed-point metric cannot represent exactly also retain
+direct drawing. A dry paint
 checks Qt's resolved primitives before touching the destination; layouts that
 include native glyph items bypass forwarding to preserve Qt's glyph rendering.
 Visible outlines at or below one device pixel also bypass path partitioning.
-Paths cut by the raster device's top or bottom retain direct Qt drawing;
-coverage differences there can survive tile composition and Inside Stroke. A widget's backing-store offset and
+Vertical device clipping includes visible stroke overhang. Horizontally
+clipped fills with no visible stroke also retain direct Qt drawing; coverage
+differences at these edges can survive tile composition. A widget's backing-store offset and
 logical device size must never be treated as an independent raster's geometry.
+Contour reuse requires exact serialized path data; approximate Qt path equality
+can alias coordinates on opposite sides of a raster rounding boundary.
 The helper owns only transient painter forwarding and bounded contour reuse;
 it must not reshape text or alter document state. Screen regression checks must
 capture the parent window with an offset child viewport: grabbing only the

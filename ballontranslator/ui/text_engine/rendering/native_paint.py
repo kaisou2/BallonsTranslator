@@ -6,7 +6,10 @@ import math
 from collections import OrderedDict
 from typing import Iterable, Optional, Sequence, Union
 
-from qtpy.QtCore import QLine, QLineF, QPoint, QPointF, QRect, QRectF, Qt
+from qtpy.QtCore import (
+    QByteArray, QDataStream, QIODevice, QLine, QLineF, QPoint, QPointF,
+    QRect, QRectF, Qt,
+)
 from qtpy.QtGui import (
     QImage,
     QPaintDevice,
@@ -26,7 +29,7 @@ _PATH_ELEMENT_THRESHOLD = 512
 _STRIP_WIDTH = 256
 _CONTOUR_CACHE_MAX_ENTRIES = 8
 _CONTOUR_CACHE_MAX_ELEMENTS = 32768
-_CONTOUR_CACHE: OrderedDict[tuple, tuple[QPainterPath, list[QPainterPath]]] = OrderedDict()
+_CONTOUR_CACHE: OrderedDict[tuple, tuple[bytes, list[QPainterPath]]] = OrderedDict()
 
 
 def _closed_contours(path: QPainterPath) -> Optional[list[QPainterPath]]:
@@ -38,8 +41,16 @@ def _closed_contours(path: QPainterPath) -> Optional[list[QPainterPath]]:
     rect = path.controlPointRect()
     count = path.elementCount()
     key = (count, path.fillRule(), rect.x(), rect.y(), rect.width(), rect.height())
+    geometry = None
+    if _PATH_ELEMENT_THRESHOLD <= count <= _CONTOUR_CACHE_MAX_ELEMENTS:
+        # Qt path equality tolerates small coordinate differences. They can
+        # cross a raster rounding boundary, so reuse requires exact path data.
+        encoded = QByteArray()
+        stream = QDataStream(encoded, QIODevice.OpenModeFlag.WriteOnly)
+        stream << path
+        geometry = bytes(encoded)
     cached = _CONTOUR_CACHE.get(key)
-    if cached is not None and cached[0] == path:
+    if cached is not None and cached[0] == geometry:
         _CONTOUR_CACHE.move_to_end(key)
         return cached[1]
     contours = []
@@ -72,11 +83,8 @@ def _closed_contours(path: QPainterPath) -> Optional[list[QPainterPath]]:
             return None
         contour.closeSubpath()
         contours.append(contour)
-    if _PATH_ELEMENT_THRESHOLD <= count <= _CONTOUR_CACHE_MAX_ELEMENTS:
-        # Fill and Stroke share these native coordinates across repaints and
-        # items. Bounds only select a candidate; ask Qt to compare the path
-        # geometry before reusing contours from text with the same metrics.
-        _CONTOUR_CACHE[key] = (QPainterPath(path), contours)
+    if geometry is not None:
+        _CONTOUR_CACHE[key] = (geometry, contours)
         _CONTOUR_CACHE.move_to_end(key)
         while len(_CONTOUR_CACHE) > _CONTOUR_CACHE_MAX_ENTRIES:
             _CONTOUR_CACHE.popitem(last=False)
@@ -106,27 +114,46 @@ def _draw_path_in_strips(painter: QPainter, path: QPainterPath) -> None:
     ):
         painter.drawPath(path)
         return
-    if bounds.top() < 0.0 or bounds.bottom() > painter.device().height():
-        # Partitioning a fill cut by the device's top/bottom changes Qt's
-        # coverage. Inside Stroke carries that difference into final page pixels.
-        painter.drawPath(path)
-        return
-    pen_width = pen.widthF()
-    smallest_device_width = (
-        pen_width if pen.isCosmetic()
-        else pen_width * min(abs(transform.m11()), abs(transform.m22()))
-    )
-    if (
+    brush_style = pen.brush().style()
+    visible_stroke = (
         pen.style() != Qt.PenStyle.NoPen
-        and smallest_device_width <= 1.0
-        and pen.brush().style() != Qt.BrushStyle.NoBrush
+        and brush_style != Qt.BrushStyle.NoBrush
         and (
-            pen.brush().style() != Qt.BrushStyle.SolidPattern
+            brush_style != Qt.BrushStyle.SolidPattern
             or pen.color().alpha() != 0
         )
+    )
+    pen_width_x = pen_width_y = 0.0
+    if visible_stroke:
+        if pen.isCosmetic():
+            pen_width_x = pen_width_y = max(1.0, pen.widthF())
+        else:
+            pen_width_x = pen.widthF() * abs(transform.m11())
+            pen_width_y = pen.widthF() * abs(transform.m22())
+    if (
+        visible_stroke
+        and min(pen_width_x, pen_width_y) <= 1.0
     ):
         # Separately clipped draws change Qt's thin-stroke coverage throughout
         # the run. Transparent alignment outlines still accelerate native fill.
+        painter.drawPath(path)
+        return
+    join_reach = 0.5
+    if pen.joinStyle() in (Qt.PenJoinStyle.MiterJoin, Qt.PenJoinStyle.SvgMiterJoin):
+        join_reach = max(join_reach, pen.miterLimit())
+    reach_x = pen_width_x * join_reach
+    reach_y = pen_width_y * join_reach
+    device = painter.device()
+    width, height = device.width(), device.height()
+    if (
+        width <= 0 or height <= 0
+        or bounds.top() - reach_y < 0.0
+        or bounds.bottom() + reach_y > height
+        or not visible_stroke and (bounds.left() < 0.0 or bounds.right() > width)
+    ):
+        # Device-edge clipping can change coverage after partitioning. Include
+        # visible stroke overhang vertically; clipped fills also retain Qt's
+        # horizontal-edge rounding without slowing long tiled stroke passes.
         painter.drawPath(path)
         return
     inverse, invertible = transform.inverted()
@@ -140,19 +167,7 @@ def _draw_path_in_strips(painter: QPainter, path: QPainterPath) -> None:
         painter.drawPath(path)
         return
 
-    device = painter.device()
-    width, height = device.width(), device.height()
-    if width <= 0 or height <= 0:
-        painter.drawPath(path)
-        return
-    if pen.isCosmetic():
-        pen_width = max(1.0, pen_width)
-    else:
-        pen_width *= abs(transform.m11())
-    reach = pen_width / 2.0
-    if pen.joinStyle() in (Qt.PenJoinStyle.MiterJoin, Qt.PenJoinStyle.SvgMiterJoin):
-        reach = pen_width * max(0.5, pen.miterLimit())
-    margin = reach + 2.0
+    margin = reach_x + 2.0
     strips: dict[int, QPainterPath] = {}
     last_strip = math.ceil(width / _STRIP_WIDTH) - 1
     for contour in contours:
@@ -367,6 +382,16 @@ def draw_native_layout(
         layout.draw(painter, QPointF(), selections, clip)
         return
     ratio = device.devicePixelRatioF()
+    scaled_ratio = ratio * QPaintDevice.devicePixelRatioFScale()
+    if (
+        ratio <= 0.0
+        or not math.isfinite(scaled_ratio)
+        or scaled_ratio != int(scaled_ratio)
+    ):
+        # This proxy exposes Qt's fixed-point DPR metric. Fractional values
+        # that it cannot represent exactly must retain the real paint device.
+        layout.draw(painter, QPointF(), selections, clip)
+        return
     expected_device_transform = transform * QTransform.fromScale(ratio, ratio)
     if painter.deviceTransform() != expected_device_transform:
         layout.draw(painter, QPointF(), selections, clip)
