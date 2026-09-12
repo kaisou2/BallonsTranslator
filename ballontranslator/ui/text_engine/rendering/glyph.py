@@ -47,10 +47,13 @@ from qtpy.QtGui import (
 )
 
 from ballontranslator.ui.misc import ndarray2pixmap, pixmap2ndarray
+from .morphology import dilate_alpha_disc
 
 
 GLYPH_STROKE_FORMAT_PROPERTY = 0x100000 + 1239
 GLYPH_DILATED_STROKE_FORMAT_PROPERTY = 0x100000 + 1240
+STROKE_ALIGNMENT_LAYOUT_FORMAT_PROPERTY = 0x100000 + 1241
+STROKE_ALIGNMENT_RANGE_LENGTH = 0x7FFFFFFF
 GLYPH_FEEDBACK_ONLY_FORMAT_PROPERTY = 0x100000 + 1242
 FALLBACK_RASTER_MAX_SCALE = 8.0
 FALLBACK_RASTER_MAX_PIXELS = 4_194_304
@@ -65,6 +68,19 @@ GLYPH_GEOMETRY_CACHE_MAX_ENTRIES = 16384
 GLYPH_GEOMETRY_CACHE_MAX_BYTES = 64 * 1024 * 1024
 GLYPH_PREVIEW_GEOMETRY_CACHE_MAX_ENTRIES = 4096
 GLYPH_PREVIEW_GEOMETRY_CACHE_MAX_BYTES = 16 * 1024 * 1024
+
+
+def stroke_alignment_format() -> QTextCharFormat:
+    """Create the transparent outline shared by native fill and Stroke."""
+    char_format = QTextCharFormat()
+    char_format.setProperty(STROKE_ALIGNMENT_LAYOUT_FORMAT_PROPERTY, True)
+    # A styled outline selects Qt's path-backed glyph rasterizer;
+    # transparent zero width paints no pixels.
+    char_format.setTextOutline(QPen(
+        QColor(0, 0, 0, 0), 0.0, Qt.PenStyle.SolidLine,
+        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin,
+    ))
+    return char_format
 
 
 class GlyphRasterAllocationError(RuntimeError):
@@ -722,22 +738,6 @@ def _draw_direct_fallbacks(
             painter.restore()
 
 
-def _dilate_fallback_alpha(alpha: np.ndarray, radius: int) -> np.ndarray:
-    dilated = alpha
-    remaining = max(0, int(radius))
-    # Repeated disk dilation is bounded while retaining a continuous thick
-    # silhouette; it avoids allocating a quadratic huge-stroke kernel.
-    while remaining:
-        chunk = min(remaining, 64)
-        diameter = chunk * 2 + 1
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (diameter, diameter)
-        )
-        dilated = cv2.dilate(dilated, kernel)
-        remaining -= chunk
-    return dilated
-
-
 def _native_color_glyph_image(
     fallback: FallbackGlyph,
     scale: float,
@@ -886,7 +886,7 @@ def _draw_fallbacks(
             fill_rgba = pixmap2ndarray(fill_image, keep_alpha=True)
             if fill_rgba is None:
                 raise MemoryError('unable to access pathless glyph pixels')
-            outline_alpha = _dilate_fallback_alpha(
+            outline_alpha = dilate_alpha_disc(
                 fill_rgba[..., 3], math.ceil(outline_radius * scale)
             )
 
@@ -1013,11 +1013,7 @@ def _draw_dilated_path_stroke(
         if rgba is None:
             raise MemoryError('unable to access glyph stroke mask pixels')
         radius = max(1, math.ceil(outline_radius * scale))
-        diameter = radius * 2 + 1
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (diameter, diameter)
-        )
-        alpha = cv2.dilate(rgba[..., 3], kernel)
+        alpha = dilate_alpha_disc(rgba[..., 3], radius)
         color = outline.color()
         stroke = np.empty_like(rgba)
         stroke[..., 0] = color.red()
